@@ -10,6 +10,7 @@ import 'package:xdnmb_api/xdnmb_api.dart' as api;
 import 'package:desktop_drop/desktop_drop.dart';
 
 import '../../app/app_state.dart';
+import '../../app/cookie_controller.dart';
 import '../../data/cookie_store.dart';
 import '../../data/draft_store.dart';
 import '../../data/post_history_store.dart';
@@ -207,8 +208,8 @@ final class _ComposerPageState extends State<ComposerPage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     // Default to user's configured default post cookie, but allow override.
-    final app = context.read<AppState>();
-    _selectedPostCookieSlotId ??= app.defaultPostCookieSlotId;
+    final cookie = context.read<CookieController>();
+    _selectedPostCookieSlotId ??= cookie.defaultPostSlotId;
   }
 
   Future<void> _pickImage() async {
@@ -247,8 +248,9 @@ final class _ComposerPageState extends State<ComposerPage> {
     if (_posting) return;
 
     final app = context.read<AppState>();
+    final cookieCtrl = context.read<CookieController>();
 
-  final selectedSlot = app.cookieSlots.cast<CookieSlot?>().firstWhere(
+  final selectedSlot = cookieCtrl.slots.cast<CookieSlot?>().firstWhere(
       (s) => s?.id == _selectedPostCookieSlotId,
       orElse: () => null,
     );
@@ -355,15 +357,18 @@ final class _ComposerPageState extends State<ComposerPage> {
         }
       }
 
-      // Best-effort: resolve newly created reply post id.
+      // Best-effort: resolve newly created reply post id and page.
       // Fetch the last page of the thread and pick the reply with the
       // highest id – that is almost certainly the one we just posted.
       int? replyPostId;
+      int? replyPage;
       if (isReply && mainPostId != null) {
         try {
           final rc = threadHead?.mainPost.replyCount ?? 0;
-          // xdnmb API returns 19 replies per page.
-          final lastPage = rc <= 0 ? 1 : ((rc - 1) ~/ 19 + 1);
+          // xdnmb API returns 19 replies per page. The new reply is the
+          // (rc + 1)-th reply, so its page is (rc ~/ 19 + 1).
+          final lastPage = rc ~/ 19 + 1;
+          replyPage = lastPage;
           final lastThread = await app.repo
               .getThreadPage(mainPostId, lastPage, forceRefresh: true);
           if (lastThread.replies.isNotEmpty) {
@@ -395,6 +400,7 @@ final class _ComposerPageState extends State<ComposerPage> {
       threadReplyCount: threadHead?.mainPost.replyCount,
       threadThumbImageUrl: threadHead?.mainPost.thumbImageUrl,
       threadContent: threadHead?.mainPost.content,
+      replyPage: replyPage,
         ),
       );
   await _clearDraft();
@@ -410,8 +416,8 @@ final class _ComposerPageState extends State<ComposerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final app = context.watch<AppState>();
-    final slotItems = app.cookieSlots;
+    final cookie = context.watch<CookieController>();
+    final slotItems = cookie.slots;
 
     final selectedSlot = slotItems.cast<CookieSlot?>().firstWhere(
           (s) => s?.id == _selectedPostCookieSlotId,
@@ -419,7 +425,7 @@ final class _ComposerPageState extends State<ComposerPage> {
         );
 
     final postSlotLabel = selectedSlot?.name ??
-        app.defaultPostCookieSlot?.name ??
+        cookie.defaultPostCookieSlot?.name ??
         (slotItems.isEmpty ? '（未导入饼干）' : '（未选择）');
 
     final viewInsets = MediaQuery.viewInsetsOf(context);
@@ -433,18 +439,25 @@ final class _ComposerPageState extends State<ComposerPage> {
         await _saveDraftNow();
       },
       child: _DraggableScalableDialog(
-      title: widget.title,
-      minSize: const Size(520, 420),
-      maxWidth: 980,
-      maxHeight: 820,
-      paddingBottom: viewInsets.bottom,
-      showImagePreview: _imagePath != null,
-      imagePath: _imagePath,
-    onClearImage: _posting || _imagePath == null
-      ? null
-      : () => setState(() => _imagePath = null),
-  onReplaceImage: _posting ? null : _setImagePath,
-      actions: [
+        title: widget.title,
+        minSize: const Size(520, 420),
+        maxWidth: 980,
+        maxHeight: 820,
+        paddingBottom: viewInsets.bottom,
+        showImagePreview: _imagePath != null,
+        imagePath: _imagePath,
+        onClearImage: _posting || _imagePath == null
+            ? null
+            : () => setState(() => _imagePath = null),
+        onReplaceImage: _posting ? null : _setImagePath,
+        onSubmit: _posting ? null : _submit,
+        onCancel: _posting
+            ? null
+            : () async {
+                await _saveDraftNow();
+                if (mounted) Navigator.of(context).pop(false);
+              },
+        actions: [
         TextButton(
           onPressed: _posting
               ? null
@@ -467,156 +480,158 @@ final class _ComposerPageState extends State<ComposerPage> {
       ],
   child: FocusTraversalGroup(
         policy: OrderedTraversalPolicy(),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.cookie_outlined),
-                const SizedBox(width: 8),
-                const Text('发言饼干：'),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    isExpanded: true,
-                    value: _selectedPostCookieSlotId,
-                    items: slotItems
-                        .map(
-                          (s) => DropdownMenuItem(
-                            value: s.id,
-                            child: Text(s.name ?? '未命名饼干'),
-                          ),
-                        )
-                        .toList(growable: false),
-                    onChanged: _posting
-                        ? null
-                        : (v) {
-                            setState(() => _selectedPostCookieSlotId = v);
-                            _scheduleSaveDraft();
-                          },
-                    decoration: InputDecoration(
-                      border: const OutlineInputBorder(),
-                      isDense: true,
-                      hintText: postSlotLabel,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.cookie_outlined),
+                  const SizedBox(width: 8),
+                  const Text('发言饼干：'),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      isExpanded: true,
+                      value: _selectedPostCookieSlotId,
+                      items: slotItems
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s.id,
+                              child: Text(s.name ?? '未命名饼干'),
+                            ),
+                          )
+                          .toList(growable: false),
+                      onChanged: _posting
+                          ? null
+                          : (v) {
+                              setState(() => _selectedPostCookieSlotId = v);
+                              _scheduleSaveDraft();
+                            },
+                      decoration: InputDecoration(
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                        hintText: postSlotLabel,
+                      ),
                     ),
                   ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              if (widget.mode == ComposerMode.newThread) ...[
+                TextField(
+                  controller: _titleCtrl,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: '标题（可选）',
+                    border: OutlineInputBorder(),
+                  ),
                 ),
+                const SizedBox(height: 10),
               ],
-            ),
-            const SizedBox(height: 10),
-            if (widget.mode == ComposerMode.newThread) ...[
-              TextField(
-                controller: _titleCtrl,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: '标题（可选）',
-                  border: OutlineInputBorder(),
+              ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 200, maxHeight: 480),
+                child: TextField(
+                  controller: _contentCtrl,
+                  focusNode: _focusNode,
+                  minLines: 8,
+                  maxLines: null,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  decoration: const InputDecoration(
+                    labelText: '内容',
+                    border: OutlineInputBorder(),
+                    alignLabelWithHint: true,
+                  ),
                 ),
               ),
               const SizedBox(height: 10),
-            ],
-            Expanded(
-              child: TextField(
-                controller: _contentCtrl,
-                focusNode: _focusNode,
-                minLines: null,
-                maxLines: null,
-                expands: true,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                decoration: const InputDecoration(
-                  labelText: '内容',
-                  border: OutlineInputBorder(),
-                  alignLabelWithHint: true,
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _posting ? null : _pickImage,
-                    icon: const Icon(Icons.image_outlined),
-                    label: Text(
-                      _imagePath == null
-                          ? '选择图片（最多1张）'
-                          : '已选择：${File(_imagePath!).uri.pathSegments.last}',
-                      overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _posting ? null : _pickImage,
+                      icon: const Icon(Icons.image_outlined),
+                      label: Text(
+                        _imagePath == null
+                            ? '选择图片（最多1张）'
+                            : '已选择：${File(_imagePath!).uri.pathSegments.last}',
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  tooltip: '移除图片',
-                  onPressed: _posting || _imagePath == null
-                      ? null
-                      : () => setState(() => _imagePath = null),
-                  icon: const Icon(Icons.delete_outline),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                InkWell(
-                  onTap: _posting
-                      ? null
-                      : () {
-                          setState(() => _watermark = !_watermark);
-                          _scheduleSaveDraft();
-                        },
-                  borderRadius: BorderRadius.circular(10),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: _watermark,
-                          onChanged: _posting
-                              ? null
-                              : (v) {
-                                  setState(() => _watermark = v ?? false);
-                                  _scheduleSaveDraft();
-                                },
-                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        const SizedBox(width: 4),
-                        const Text('水印'),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                if (_showDraftSaved)
-                  Text(
-                    '已自动保存',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                  ),
-                const Spacer(),
-                Flexible(
-                  flex: 1,
-                  child: _EmoticonDropdown(
-                    expanded: _emoticonExpanded,
-                    onExpandedChanged: _posting
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: '移除图片',
+                    onPressed: _posting || _imagePath == null
                         ? null
-                        : (v) => setState(() => _emoticonExpanded = v),
-                    onInsert: (t) {
-                      _insertText(t);
-                      if (_focusNode.canRequestFocus) {
-                        _focusNode.requestFocus();
-                      }
-                    },
-                    backgroundColor: cs.surface,
+                        : () => setState(() => _imagePath = null),
+                    icon: const Icon(Icons.delete_outline),
                   ),
-                ),
-              ],
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  InkWell(
+                    onTap: _posting
+                        ? null
+                        : () {
+                            setState(() => _watermark = !_watermark);
+                            _scheduleSaveDraft();
+                          },
+                    borderRadius: BorderRadius.circular(10),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Checkbox(
+                            value: _watermark,
+                            onChanged: _posting
+                                ? null
+                                : (v) {
+                                    setState(() => _watermark = v ?? false);
+                                    _scheduleSaveDraft();
+                                  },
+                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          const SizedBox(width: 4),
+                          const Text('水印'),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (_showDraftSaved)
+                    Text(
+                      '已自动保存',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                    ),
+                  const Spacer(),
+                  Flexible(
+                    flex: 1,
+                    child: _EmoticonDropdown(
+                      expanded: _emoticonExpanded,
+                      onExpandedChanged: _posting
+                          ? null
+                          : (v) => setState(() => _emoticonExpanded = v),
+                      onInsert: (t) {
+                        _insertText(t);
+                        if (_focusNode.canRequestFocus) {
+                          _focusNode.requestFocus();
+                        }
+                      },
+                      backgroundColor: cs.surface,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
   ),
@@ -818,6 +833,15 @@ final class _EmoticonButtonState extends State<_EmoticonButton>
   }
 }
 
+/// Desktop shortcuts for the composer dialog.
+class _SendIntent extends Intent {
+  const _SendIntent();
+}
+
+class _CancelIntent extends Intent {
+  const _CancelIntent();
+}
+
 final class _DraggableScalableDialog extends StatefulWidget {
   final String title;
   final Widget child;
@@ -830,6 +854,8 @@ final class _DraggableScalableDialog extends StatefulWidget {
   final String? imagePath;
   final VoidCallback? onClearImage;
   final ValueChanged<String>? onReplaceImage;
+  final Future<void> Function()? onSubmit;
+  final VoidCallback? onCancel;
 
   const _DraggableScalableDialog({
     required this.title,
@@ -843,6 +869,8 @@ final class _DraggableScalableDialog extends StatefulWidget {
   required this.imagePath,
   required this.onClearImage,
   required this.onReplaceImage,
+    this.onSubmit,
+    this.onCancel,
   });
 
   @override
@@ -859,8 +887,6 @@ final class _DraggableScalableDialogState extends State<_DraggableScalableDialog
   Offset? _resizeStartGlobal;
   double? _resizeStartW;
   double? _resizeStartH;
-
-  bool _ctrlDown = false;
 
   Offset? _lastMousePos;
 
@@ -943,50 +969,63 @@ final class _DraggableScalableDialogState extends State<_DraggableScalableDialog
     _scale = clampedScale;
     _offset = clampedOffset;
 
-    return RawKeyboardListener(
-      focusNode: FocusNode(skipTraversal: true),
-      onKey: (event) {
-        final down = event is RawKeyDownEvent;
-        if (event.logicalKey == LogicalKeyboardKey.controlLeft ||
-            event.logicalKey == LogicalKeyboardKey.controlRight) {
-          _ctrlDown = down;
-        }
+    return Actions(
+      actions: {
+        _SendIntent: CallbackAction<_SendIntent>(
+          onInvoke: (_) {
+            // ignore: discarded_futures
+            widget.onSubmit?.call();
+            return null;
+          },
+        ),
+        _CancelIntent: CallbackAction<_CancelIntent>(
+          onInvoke: (_) {
+            widget.onCancel?.call();
+            return null;
+          },
+        ),
       },
-      child: Material(
-      type: MaterialType.transparency,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: () => Navigator.of(context).pop(false),
-              child: Container(color: Colors.black54),
-            ),
-          ),
-          Center(
-            child: Listener(
-              onPointerSignal: (sig) {
-                if (!_ctrlDown) return;
-                if (sig is PointerScrollEvent) {
-                  final dy = sig.scrollDelta.dy;
-                  // Ctrl+wheel zoom: up => zoom in, down => zoom out.
-                  final factor = math.exp((-dy) / 300.0);
-                  setState(() {
-                    // Zoom around mouse pointer (if we have one), so it's more
-                    // "cursor-centric".
-                    final before = _scale;
-                    final after = (_scale * factor).clamp(minScale, maxScale);
-                    final p = _lastMousePos;
-                    if (p != null) {
-                      final center = Offset(size.width / 2, (size.height - widget.paddingBottom) / 2);
-                      // World point before zoom.
-                      final world = (p - center - _offset) / before;
-                      // New offset such that the same world point stays under cursor.
-                      _offset = p - center - world * after;
-                    }
-                    _scale = after;
-                  });
-                }
-              },
+      child: Shortcuts(
+        shortcuts: {
+          LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.enter):
+              const _SendIntent(),
+          const SingleActivator(LogicalKeyboardKey.escape):
+              const _CancelIntent(),
+        },
+        child: Focus(
+          autofocus: true,
+          child: Material(
+            type: MaterialType.transparency,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: GestureDetector(
+                    onTap: () => Navigator.of(context).pop(false),
+                    child: Container(color: Colors.black54),
+                  ),
+                ),
+                Center(
+                  child: Listener(
+                    onPointerSignal: (sig) {
+                      if (!HardwareKeyboard.instance.isControlPressed) return;
+                      if (sig is PointerScrollEvent) {
+                        final dy = sig.scrollDelta.dy;
+                        // Ctrl+wheel zoom: up => zoom in, down => zoom out.
+                        final factor = math.exp((-dy) / 300.0);
+                        setState(() {
+                          // Zoom around mouse pointer (if we have one).
+                          final before = _scale;
+                          final after = (_scale * factor).clamp(minScale, maxScale);
+                          final p = _lastMousePos;
+                          if (p != null) {
+                            final center = Offset(size.width / 2, (size.height - widget.paddingBottom) / 2);
+                            final world = (p - center - _offset) / before;
+                            _offset = p - center - world * after;
+                          }
+                          _scale = after;
+                        });
+                      }
+                    },
               onPointerHover: (e) => _lastMousePos = e.position,
               child: GestureDetector(
               onScaleStart: (d) {
@@ -1139,7 +1178,9 @@ final class _DraggableScalableDialogState extends State<_DraggableScalableDialog
         ],
       ),
     ),
-    );
+  ),
+),
+);
   }
 }
 

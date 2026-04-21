@@ -1,4 +1,10 @@
 import 'package:flutter/material.dart';
+import 'dart:io';
+import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
+import 'package:provider/provider.dart';
+import '../../app/settings_controller.dart';
+import '../widgets/cdn_fallback_image.dart';
 
 /// Start page shown when app launches.
 ///
@@ -130,30 +136,153 @@ final class StartPage extends StatelessWidget {
       );
     }
 
-    return Container(
-      constraints: const BoxConstraints(
-        minHeight: 250,
-        maxHeight: 400,
-      ),
-      width: double.infinity,
-      child: AspectRatio(
-        aspectRatio: 16 / 9, // 常见的图片比例
-        child: Image.network(
-          '${randomCoverUrl.toString()}${randomCoverUrl.toString().contains('?') ? '&' : '?'}_=$randomCoverNonce',
-          fit: BoxFit.contain,
-          filterQuality: FilterQuality.low,
-          errorBuilder: (context, error, stack) => Container(
-            alignment: Alignment.center,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.broken_image_outlined),
-                const SizedBox(height: 8),
-                Text('图片加载失败', style: TextStyle(color: cs.onSurfaceVariant)),
-              ],
+    return InkWell(
+      onTap: () => _openFullScreenPreview(context),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        constraints: const BoxConstraints(
+          minHeight: 250,
+          maxHeight: 400,
+        ),
+        width: double.infinity,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: AspectRatio(
+            aspectRatio: 16 / 9,
+            child: CdnFallbackCachedNetworkImage(
+              // Random cover changes on refresh; but avoid forcing cache-bypass for
+              // every rebuild. We only bump nonce when the cover URL changes.
+              imageUrl: '${randomCoverUrl.toString()}${randomCoverUrl.toString().contains('?') ? '&' : '?'}_=$randomCoverNonce',
+              fit: BoxFit.contain,
+              placeholder: (context, url) => Center(
+                child: SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: cs.primary,
+                  ),
+                ),
+              ),
+              errorWidget: (context, url, error) => Container(
+                alignment: Alignment.center,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.broken_image_outlined),
+                    const SizedBox(height: 8),
+                    Text('图片加载失败', style: TextStyle(color: cs.onSurfaceVariant)),
+                  ],
+                ),
+              ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _downloadRandomCover(BuildContext context) async {
+    if (randomCoverUrl == null) return;
+    final settings = context.read<SettingsController>();
+    final defaultDir = settings.downloadDirectory;
+    final dir = (defaultDir != null && defaultDir.trim().isNotEmpty)
+        ? defaultDir.trim()
+        : (Platform.environment['USERPROFILE'] ??
+            Platform.environment['HOME'] ??
+            '.');
+    final fileName = 'xdnmb_cover_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final targetPath = p.join(dir, fileName);
+    await File(targetPath).parent.create(recursive: true);
+
+    try {
+      final request = await http.Client().send(
+        http.Request('GET', Uri.parse(randomCoverUrl.toString())),
+      );
+      if (request.statusCode != 200) {
+        throw Exception('HTTP ${request.statusCode}');
+      }
+      await request.stream.pipe(File(targetPath).openWrite());
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('已保存至: $targetPath')));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      }
+    }
+  }
+
+  void _openFullScreenPreview(BuildContext context) {
+    if (randomCoverUrl == null) return;
+    var nonce = 0;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) {
+          final url = nonce > 0
+              ? '${randomCoverUrl.toString()}${randomCoverUrl.toString().contains('?') ? '&' : '?'}_=$nonce'
+              : randomCoverUrl.toString();
+          return Dialog(
+            insetPadding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 900, maxHeight: 720),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 16),
+                          child: Text(
+                            '由于岛的api设计，看到的图和下载的图都是随机的( ﾟ∀。)7',
+                            style: Theme.of(ctx).textTheme.bodySmall,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '刷新',
+                        onPressed: () => setState(() => nonce++),
+                        icon: const Icon(Icons.refresh),
+                      ),
+                      IconButton(
+                        tooltip: '下载原图',
+                        onPressed: () => _downloadRandomCover(ctx),
+                        icon: const Icon(Icons.download_outlined),
+                      ),
+                      IconButton(
+                        tooltip: '关闭',
+                        onPressed: () => Navigator.pop(ctx),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  Flexible(
+                    child: InteractiveViewer(
+                      minScale: 0.2,
+                      maxScale: 8,
+                      child: CdnFallbackCachedNetworkImage(
+                        imageUrl: url,
+                        fit: BoxFit.contain,
+                        placeholder: (context, url) => const Center(
+                          child: CircularProgressIndicator(),
+                        ),
+                        errorWidget: (context, url, error) => Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text('图片加载失败：$error'),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -188,3 +317,4 @@ Widget _bullet(BuildContext context, String text) {
     ),
   );
 }
+

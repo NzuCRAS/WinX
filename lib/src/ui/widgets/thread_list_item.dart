@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../app/app_state.dart';
+import '../../app/settings_controller.dart';
 import 'list_preview.dart';
 import 'preview_rich_text.dart';
+import 'cdn_fallback_image.dart';
 
 /// A list item that matches the normal forum thread list layout:
 /// - optional thumbnail on the left
@@ -17,6 +18,7 @@ final class ThreadListItem extends StatelessWidget {
   final String cookie;
   final DateTime time;
   final bool isAdmin;
+  final bool isSage;
   final VoidCallback? onTap;
   final VoidCallback? onSecondaryTap;
 
@@ -28,6 +30,7 @@ final class ThreadListItem extends StatelessWidget {
     required this.cookie,
     required this.time,
     this.isAdmin = false,
+  this.isSage = false,
     this.onTap,
     this.onSecondaryTap,
   });
@@ -51,7 +54,7 @@ final class ThreadListItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final app = context.watch<AppState>();
+    final settings = context.watch<SettingsController>();
 
     final t = title?.trim();
     final preview = (() {
@@ -74,9 +77,9 @@ final class ThreadListItem extends StatelessWidget {
     }
     final base = Theme.of(context).textTheme.labelSmall?.copyWith(
           color: cs.onSurfaceVariant,
-          fontSize: (app.contentFontSize - 2).clamp(10, 999),
-          height: app.contentLineHeight,
-          fontFamily: app.fontFamily.isEmpty ? null : app.fontFamily,
+          fontSize: (settings.contentFontSize - 2).clamp(10, 999),
+          height: settings.contentLineHeight,
+          fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
         );
 
     final tile = ListTile(
@@ -84,14 +87,23 @@ final class ThreadListItem extends StatelessWidget {
           ? null
           : ClipRRect(
               borderRadius: BorderRadius.circular(6),
-              child: Image.network(
-                thumbUrl!,
+              child: CdnFallbackCachedNetworkImage(
+                imageUrl: thumbUrl!,
                 width: 56,
                 height: 56,
                 fit: BoxFit.cover,
-                cacheWidth: 56,
-                cacheHeight: 56,
-                errorBuilder: (context, error, stack) => Container(
+                placeholder: (context, url) => Container(
+                  width: 56,
+                  height: 56,
+                  color: cs.surfaceContainerHighest,
+                  alignment: Alignment.center,
+                  child: const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+                errorWidget: (context, url, error) => Container(
                   width: 56,
                   height: 56,
                   alignment: Alignment.center,
@@ -110,16 +122,16 @@ final class ThreadListItem extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontWeight: FontWeight.w600,
-                fontFamily: app.fontFamily.isEmpty ? null : app.fontFamily,
+                fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
               ),
             ),
           PreviewRichText(
             text: preview,
-            maxLines: app.previewMaxLines,
+            maxLines: settings.previewMaxLines,
             style: TextStyle(
-              fontSize: app.contentFontSize,
-              height: app.contentLineHeight,
-              fontFamily: app.fontFamily.isEmpty ? null : app.fontFamily,
+              fontSize: settings.contentFontSize,
+              height: settings.contentLineHeight,
+              fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
             ),
           ),
           const SizedBox(height: 4),
@@ -127,6 +139,17 @@ final class ThreadListItem extends StatelessWidget {
             TextSpan(
               style: base,
               children: [
+                if (isSage) ...[
+                  TextSpan(
+                    text: 'SAGE ↓  ',
+                    style: base?.copyWith(
+                      color: cs.error,
+                      fontWeight: FontWeight.w800,
+                      fontSize:
+                          ((base.fontSize ?? 12) * 1.25).clamp(10, 999),
+                    ),
+                  ),
+                ],
                 if (isReplyLabel && cookieText.startsWith('回串')) ...[
                   TextSpan(
                     text: '回串',

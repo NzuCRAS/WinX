@@ -1380,6 +1380,9 @@ class Feed extends FeedBase {
   final String status;
 
   @override
+  final bool isSage;
+
+  @override
   final bool isAdmin;
 
   @override
@@ -1406,6 +1409,7 @@ class Feed extends FeedBase {
       this.title = '',
       required this.content,
       this.status = 'n',
+  this.isSage = false,
       this.isAdmin = false,
       this.isHidden = false,
       this.po = ''});
@@ -1467,6 +1471,7 @@ class Feed extends FeedBase {
             title: map['title'] ?? '',
             content: map['content'],
             status: map['status'] ?? 'n',
+            isSage: (int.tryParse((map['sage'] ?? '0').toString()) ?? 0) != 0,
             isAdmin: (int.tryParse(map['admin'] ?? '0') ?? 0) != 0,
             isHidden: (int.tryParse(map['hide'] ?? '0') ?? 0) != 0,
             po: map['po'] ?? '')
@@ -1915,9 +1920,6 @@ class Emoticon {
     Emoticon(
         name: '大嘘',
         text: '吁~~~~　　rnm，退钱！\n 　　　/　　　/ \n(　ﾟ 3ﾟ) `ー´) `д´) `д´)\n'),
-    Emoticon(name: '防剧透', text: '[h] [/h]'),
-    Emoticon(name: '骰子', text: '[n]'),
-    Emoticon(name: '高级骰子', text: '[n,m]'),
   ];
 // autocorrect: true
 
@@ -1978,6 +1980,8 @@ class XdnmbApi {
   /// HTTP client
   final Client _client;
 
+  final bool _ownsClient;
+
   /// 用户饼干
   XdnmbCookie? xdnmbCookie;
 
@@ -2006,15 +2010,19 @@ class XdnmbApi {
   /// [userAgent] 为`User-Agent`，默认为`xdnmb`
   XdnmbApi(
       {String? userHash,
+      Client? httpClient,
       HttpClient? client,
       Duration? connectionTimeout,
       Duration? idleTimeout,
       String? userAgent})
-      : _client = Client(
-            client: client,
-            connectionTimeout: connectionTimeout,
-            idleTimeout: idleTimeout,
-            userAgent: userAgent),
+      : _ownsClient = httpClient == null,
+        _client = httpClient ??
+            Client(
+              client: client,
+              connectionTimeout: connectionTimeout,
+              idleTimeout: idleTimeout,
+              userAgent: userAgent,
+            ),
         xdnmbCookie = userHash != null ? XdnmbCookie(userHash) : null;
 
   /// 更新 X 岛链接
@@ -2037,7 +2045,12 @@ class XdnmbApi {
   ///
   /// 说明：这里不会下载图片内容，只返回最终 URL，方便客户端用 `Image.network` 展示。
   Future<Uri> getRandomCoverUrl() async {
-    final url = XdnmbUrls.randomCoverRedirect;
+    // Append a nonce to bypass any HTTP cache on the 302 redirect itself.
+    final url = XdnmbUrls.randomCoverRedirect.replace(
+      queryParameters: {
+        '_': DateTime.now().millisecondsSinceEpoch.toString(),
+      },
+    );
     return _followRedirects(url, maxRedirects: 5);
   }
 
@@ -2052,6 +2065,9 @@ class XdnmbApi {
 
     // Use a low-level request so we can read redirect headers.
     final req = Request('GET', url);
+    // Disable HTTP caching so the server always returns a fresh redirect.
+    req.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    req.headers['Pragma'] = 'no-cache';
     final streamed = await _client.send(req);
 
     // 检查是否是重定向
@@ -2513,7 +2529,18 @@ class XdnmbApi {
           cookie: cookie);
 
   /// 关闭 HTTP client
-  void close() => _client.close();
+  void close() {
+    if (_ownsClient) {
+      _client.close();
+    }
+  }
+
+  /// Close the shared HTTP client used by `XdnmbUrls.update()`.
+  ///
+  /// The app should call this on shutdown.
+  static void closeSharedHttpClient() {
+    XdnmbUrlsSharedHttpClient.close();
+  }
 
   /// 获取验证码图片
   Future<Uint8List> getVerifyImage() async =>

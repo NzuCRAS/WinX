@@ -1,4 +1,5 @@
 import 'database_helper.dart';
+import 'perf_log.dart';
 
 final class HistoryEntry {
   final int threadId;
@@ -61,7 +62,7 @@ final class HistoryStore {
   final DatabaseHelper _db;
 
   Future<List<HistoryEntry>> readAll() async {
-  return _db.getAllHistory();
+  return PerfLog.time('history.readAll', _db.getAllHistory);
   }
 
   Future<void> recordVisit({
@@ -74,26 +75,29 @@ final class HistoryStore {
     String? thumbImageUrl,
     String? content,
   }) async {
-    await _db.insertHistory(
-      HistoryEntry(
-        threadId: threadId,
-        title: title,
-        userHash: userHash,
-        isAdmin: isAdmin,
-        postTime: postTime,
-        replyCount: replyCount,
-        thumbImageUrl: thumbImageUrl,
-        content: content,
-        visitedAt: DateTime.now(),
+    await PerfLog.time(
+      'history.recordVisit',
+      () => _db.insertHistory(
+        HistoryEntry(
+          threadId: threadId,
+          title: title,
+          userHash: userHash,
+          isAdmin: isAdmin,
+          postTime: postTime,
+          replyCount: replyCount,
+          thumbImageUrl: thumbImageUrl,
+          content: content,
+          visitedAt: DateTime.now(),
+        ),
       ),
     );
   }
 
   Future<void> remove(int threadId) async {
-  await _db.deleteHistory(threadId);
+  await PerfLog.time('history.remove', () => _db.deleteHistory(threadId));
   }
 
   Future<void> clear() async {
-  await _db.clearHistory();
+  await PerfLog.time('history.clear', _db.clearHistory);
   }
 }

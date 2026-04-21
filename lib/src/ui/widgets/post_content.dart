@@ -5,58 +5,122 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:xdnmb_api/xdnmb_api.dart' as api;
 
 import '../../app/app_state.dart';
+import '../../app/settings_controller.dart';
 
 /// Semi-rich text renderer:
 /// - clickable `>>123456` references (preview via API)
 /// - clickable URLs
-final class PostContent extends StatelessWidget {
+/// - greentext lines (starting with `>`)
+/// - spoiler blocks `[h]...[/h]` (tap to reveal)
+///
+/// All gesture recognizers are created fresh on every build and disposed either
+/// before the next build or in [dispose], preventing memory leaks.
+final class PostContent extends StatefulWidget {
   final String text;
   final int postId;
 
-  const PostContent({super.key, required this.text, required this.postId});
+  /// If provided, `>>No.xxx` references whose postId is in this list will
+  /// trigger [onRefInThread] instead of opening the external reference dialog.
+  final List<int>? inThreadPostIds;
 
+  /// Called when the user taps a `>>No.xxx` reference that exists in the
+  /// current thread (i.e. [inThreadPostIds] contains the referenced id).
+  final ValueChanged<int>? onRefInThread;
+
+  const PostContent({
+    super.key,
+    required this.text,
+    required this.postId,
+    this.inThreadPostIds,
+    this.onRefInThread,
+  });
+
+  @override
+  State<PostContent> createState() => _PostContentState();
+}
+
+final class _PostContentState extends State<PostContent> {
   static final _ref = RegExp(r'>>\s*(?:No\.)?\s*(\d{1,10})');
-  static final _url = RegExp(r'(https?://[^\s]+)');
-  static final _spoiler = RegExp(r'\[h\]([\s\S]*?)\[\/h\]', caseSensitive: false);
+  // Exclude common trailing punctuation and whitespace from the match.
+  static final _url = RegExp(r'(https?://[^\s"<>(){}\[\]]+)');
+  static final _spoiler =
+      RegExp(r'\[h\]([\s\S]*?)\[\/h\]', caseSensitive: false);
+  // Advanced dice prefix: bold the digit before [n,m].
+  static final _dicePrefix = RegExp(r'(\d+)\[(\d+),(\d+)\]');
 
   static final _refDialogKey = GlobalKey<_ReferenceDialogState>();
   static bool _refDialogOpen = false;
 
+  /// Recognizers created during the last build. Disposed before the next build
+  /// and in [dispose].
+  final List<GestureRecognizer> _recognizers = [];
+
+  @override
+  void dispose() {
+    _disposeRecognizers();
+    super.dispose();
+  }
+
+  void _disposeRecognizers() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  TapGestureRecognizer _tapRecognizer(VoidCallback onTap) {
+    final r = TapGestureRecognizer()..onTap = onTap;
+    _recognizers.add(r);
+    return r;
+  }
+
   @override
   Widget build(BuildContext context) {
-  final spans = <InlineSpan>[];
-  final s = _normalizePostText(text);
+    // Clean up recognizers from previous build before creating new ones.
+    _disposeRecognizers();
 
-  spans.addAll(_buildInlineSpans(context, s));
+    final spans = <InlineSpan>[];
+    final s = _normalizePostText(widget.text);
+    spans.addAll(_buildInlineSpans(context, s));
 
-    final app = context.watch<AppState>();
+    // Use Selectors to only rebuild when the specific fields change,
+    // rather than watching the entire SettingsController.
+    final fontSize = context.select(
+      (SettingsController s) => s.contentFontSize,
+    );
+    final lineHeight = context.select(
+      (SettingsController s) => s.contentLineHeight,
+    );
+    final fontFamily = context.select(
+      (SettingsController s) => s.fontFamily,
+    );
+
     return SelectableText.rich(
       TextSpan(
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              fontSize: app.contentFontSize,
-              height: app.contentLineHeight,
-              fontFamily: app.fontFamily.isEmpty ? null : app.fontFamily,
+              fontSize: fontSize,
+              height: lineHeight,
+              fontFamily: fontFamily.isEmpty ? null : fontFamily,
             ),
         children: spans,
       ),
     );
   }
 
-  static List<InlineSpan> _buildInlineSpans(BuildContext context, String s) {
-    // Step 1: parse spoiler blocks. Outer-most non-overlapping matches only.
+  List<InlineSpan> _buildInlineSpans(BuildContext context, String s) {
     final parts = <InlineSpan>[];
     var cursor = 0;
     for (final match in _spoiler.allMatches(s)) {
       if (match.start > cursor) {
-        parts.addAll(
-            _buildInlineSpansNoSpoiler(context, s.substring(cursor, match.start)));
+        parts.addAll(_buildInlineSpansNoSpoiler(
+            context, s.substring(cursor, match.start)));
       }
 
       final inner = match.group(1) ?? '';
       parts.add(
         WidgetSpan(
           alignment: PlaceholderAlignment.middle,
-          child: _SpoilerBlock(text: inner, interactive: true),
+          child: _SpoilerBlock(text: inner),
         ),
       );
       cursor = match.end;
@@ -68,20 +132,19 @@ final class PostContent extends StatelessWidget {
     return parts;
   }
 
-  static List<InlineSpan> _buildInlineSpansNoSpoiler(
+  List<InlineSpan> _buildInlineSpansNoSpoiler(
       BuildContext context, String s) {
-    // Split into lines so we can apply greentext style for lines starting with `>`.
     final spans = <InlineSpan>[];
-
-    // Keep line breaks as individual spans so SelectableText preserves them.
     final lines = s.split('\n');
+    final green = _greentextColor(Theme.of(context));
+
     for (int li = 0; li < lines.length; li++) {
       final line = lines[li];
-  final green = _greentextColor(Theme.of(context));
-      spans.addAll(_buildInlineSpansLeaf(context, line,
-          baseStyle: line.startsWith('>')
-      ? TextStyle(color: green)
-              : null));
+      spans.addAll(_buildInlineSpansLeaf(
+        context,
+        line,
+        baseStyle: line.startsWith('>') ? TextStyle(color: green) : null,
+      ));
       if (li != lines.length - 1) {
         spans.add(const TextSpan(text: '\n'));
       }
@@ -90,7 +153,7 @@ final class PostContent extends StatelessWidget {
     return spans;
   }
 
-  static List<InlineSpan> _buildInlineSpansLeaf(
+  List<InlineSpan> _buildInlineSpansLeaf(
     BuildContext context,
     String s, {
     TextStyle? baseStyle,
@@ -109,57 +172,92 @@ final class PostContent extends StatelessWidget {
           style: (baseStyle ?? const TextStyle()).copyWith(
             color: Theme.of(context).colorScheme.primary,
           ),
-          recognizer: TapGestureRecognizer()
-            ..onTap = id == null
-                ? null
-                : () async {
-                    final st = _refDialogKey.currentState;
-                    if (_refDialogOpen && st != null) {
-                      st.push(id);
-                      return;
-                    }
+          recognizer: _tapRecognizer(() async {
+            if (id == null) return;
 
-                    _refDialogOpen = true;
-                    try {
-                      await showDialog(
-                        context: context,
-                        builder: (context) => _ReferenceDialog(
-                          key: _refDialogKey,
-                          initialPostId: id,
-                        ),
-                      );
-                    } finally {
-                      _refDialogOpen = false;
-                    }
-                  },
+            // If the referenced post is in the current thread, jump directly.
+            final ids = widget.inThreadPostIds;
+            final onInThread = widget.onRefInThread;
+            if (ids != null && onInThread != null && ids.contains(id)) {
+              onInThread(id);
+              return;
+            }
+
+            final st = _refDialogKey.currentState;
+            if (_refDialogOpen && st != null) {
+              st.push(id);
+              return;
+            }
+
+            _refDialogOpen = true;
+            try {
+              await showDialog(
+                context: context,
+                builder: (context) => _ReferenceDialog(
+                  key: _refDialogKey,
+                  initialPostId: id,
+                ),
+              );
+            } finally {
+              _refDialogOpen = false;
+            }
+          }),
         ));
         i = refMatch.end;
         continue;
       }
 
       if (urlMatch != null) {
-        final raw = urlMatch.group(1)!;
+        final fullMatch = urlMatch.group(1)!;
+        // Trim trailing punctuation (ASCII + common CJK) so the link doesn't
+        // include commas, periods, quotes, etc.
+        final raw = fullMatch.replaceAll(
+          RegExp(r'''[.,;:!?)\]}'"\s。，、；：！？）】》」』]+$'''),
+          '',
+        );
+        final trailing = fullMatch.substring(raw.length);
+
         spans.add(TextSpan(
           text: raw,
           style: (baseStyle ?? const TextStyle()).copyWith(
             color: Theme.of(context).colorScheme.primary,
             decoration: TextDecoration.underline,
           ),
-          recognizer: TapGestureRecognizer()
-            ..onTap = () {
-              final uri = Uri.tryParse(raw);
-              if (uri != null) {
-                launchUrl(uri, mode: LaunchMode.externalApplication);
-              }
-            },
+          recognizer: _tapRecognizer(() {
+            final uri = Uri.tryParse(raw);
+            if (uri != null) {
+              launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          }),
         ));
+
+        if (trailing.isNotEmpty) {
+          spans.add(TextSpan(text: trailing, style: baseStyle));
+        }
         i = urlMatch.end;
+        continue;
+      }
+
+      final diceMatch = _dicePrefix.matchAsPrefix(s, i);
+      if (diceMatch != null) {
+        final prefix = diceMatch.group(1)!;
+        final n = diceMatch.group(2)!;
+        final m = diceMatch.group(3)!;
+        spans.add(TextSpan(
+          text: prefix,
+          style: (baseStyle ?? const TextStyle()).copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ));
+        spans.add(TextSpan(text: '[$n,$m]', style: baseStyle));
+        i = diceMatch.end;
         continue;
       }
 
       final next = [
         _ref.firstMatch(s.substring(i)),
         _url.firstMatch(s.substring(i)),
+        _dicePrefix.firstMatch(s.substring(i)),
       ].whereType<RegExpMatch>().map((m) => m.start).fold<int?>(
           null, (min, v) => (min == null || v < min) ? v : min);
 
@@ -172,16 +270,19 @@ final class PostContent extends StatelessWidget {
 
   static Color _greentextColor(ThemeData theme) {
     final b = theme.brightness;
-    // Keep it readable on both themes.
-    return b == Brightness.dark ? Colors.lightGreenAccent.shade200 : Colors.green.shade700;
+    return b == Brightness.dark
+        ? Colors.lightGreenAccent.shade200
+        : Colors.green.shade700;
   }
 }
 
+/// Spoiler block: shows a black bar when collapsed; reveals rich content
+/// (with ref/URL/greentext support) when tapped. Revealed content is rendered
+/// as a nested [PostContent] so it participates in text selection.
 final class _SpoilerBlock extends StatefulWidget {
   final String text;
-  final bool interactive;
 
-  const _SpoilerBlock({required this.text, this.interactive = true});
+  const _SpoilerBlock({required this.text});
 
   @override
   State<_SpoilerBlock> createState() => _SpoilerBlockState();
@@ -193,33 +294,36 @@ final class _SpoilerBlockState extends State<_SpoilerBlock> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-  final content = widget.text;
 
-    final canToggle = widget.interactive;
+    if (!_revealed) {
+      return InkWell(
+        onTap: () => setState(() => _revealed = true),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: const SizedBox(width: 72, height: 18),
+        ),
+      );
+    }
 
-    final bar = Container(
+    return InkWell(
+      onTap: () => setState(() => _revealed = false),
+      child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
         decoration: BoxDecoration(
-          color: _revealed ? cs.surfaceContainerHighest : Colors.black,
+          color: cs.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(4),
         ),
-        child: _revealed
-            ? SelectableText.rich(
-                TextSpan(
-                  style: TextStyle(color: cs.onSurface),
-                  children: PostContent._buildInlineSpans(
-                      context, _normalizePostText(content)),
-                ),
-              )
-            // Covered state: show a pure black bar, no text.
-            : const SizedBox(width: 72, height: 18),
-      );
-
-    if (!canToggle) return bar;
-    return InkWell(
-      onTap: () => setState(() => _revealed = !_revealed),
-      child: bar,
+        child: PostContent(
+          text: _normalizePostText(widget.text),
+          postId: 0,
+        ),
+      ),
     );
   }
 }
@@ -240,7 +344,6 @@ String normalizeDialogHtml(String input) {
   var s = input;
 
   // Font color/style wrappers: keep content, drop the tags.
-  // Example: 任天堂<font color="DeepSkyBlue">N</font> -> 任天堂N
   s = s.replaceAllMapped(
     RegExp(r'<\s*font\b[^>]*>(.*?)<\s*\/font\s*>',
         caseSensitive: false, dotAll: true),
@@ -259,7 +362,7 @@ String normalizeDialogHtml(String input) {
   // Anchor: <a href="url">text</a> => text（url）
   s = s.replaceAllMapped(
     RegExp(
-  r'''<\s*a\b[^>]*href\s*=\s*(["\'])(.*?)\1[^>]*>(.*?)<\s*\/a\s*>''',
+      r'''<\s*a\b[^>]*href\s*=\s*(["\u0027])(.*?)\1[^>]*>(.*?)<\s*\/a\s*>''',
       caseSensitive: false,
       dotAll: true,
     ),
@@ -425,15 +528,11 @@ final class _ReferenceDialogState extends State<_ReferenceDialog> {
 
 String _formatReferenceAuthor(api.Reference ref) {
   final rawName = ref.name.trim();
-
-  // API 侧的 Reference 模型默认值就是“无名氏”，所以仅仅判断空串不够。
-  // 当 name 为空或等于默认匿名名时，退化为显示 userHash（饼干标识）的一部分。
   if (rawName.isNotEmpty && rawName != '无名氏') return rawName;
 
   final uh = ref.userHash.trim();
   if (uh.isEmpty) return '无名氏';
 
-  // 显示 userHash 的前 N 位作为“饼干标识”（不加任何前缀），避免你说的“第一位消失”。
   const n = 8;
   final shown = uh.length <= n ? uh : uh.substring(0, n);
   return shown.toUpperCase();
@@ -478,9 +577,10 @@ String _normalizePostText(String input) {
   // Normalize newlines
   s = s.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
 
-  // Collapse excessive blank lines (common when HTML already contains `\n`
-  // plus `<br>`/`</p>` conversions). For in-post content, two consecutive newlines
-  // are usually unintended and look like an extra blank line.
-  s = s.replaceAll(RegExp(r'\n{2,}'), '\n');
+  // Collapse excessive blank lines, but keep paragraph breaks (two newlines).
+  // Three+ consecutive newlines are usually unintended (from multiple HTML
+  // break conversions); two newlines are a legitimate paragraph separator.
+  s = s.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+
   return s;
 }

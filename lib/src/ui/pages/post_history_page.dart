@@ -4,10 +4,12 @@ import 'package:provider/provider.dart';
 
 import '../../data/post_history_store.dart';
 import '../../app/app_state.dart';
+import '../../app/composer_controller.dart';
+import '../../app/settings_controller.dart';
+import '../widgets/cdn_fallback_image.dart';
 import '../widgets/list_preview.dart';
 import '../widgets/thread_list_item.dart';
 import 'thread_page.dart';
-import 'composer_page.dart';
 
 final class PostHistoryPage extends StatefulWidget {
   const PostHistoryPage({super.key});
@@ -257,6 +259,7 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                                 mainPostId: e.mainPostId!,
                                 title: e.title,
                                 flashPostId: e.replyPostId,
+                                initialPage: e.replyPage,
                               ),
                             ),
                           );
@@ -265,10 +268,10 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
 
                         // Fallback: open composer (rare).
                         if (!e.isReply && e.forumId != null) {
-                          showDialog<bool>(
-                            context: context,
-                            barrierDismissible: false,
-                            builder: (context) => ComposerPage.newThread(
+                          final composer = context.read<ComposerController>();
+                          composer.openPanel(
+                            ComposerArgs(
+                              mode: ComposerMode.newThread,
                               forumId: e.forumId!,
                               initialContent: e.content,
                             ),
@@ -471,16 +474,16 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                 final tid = e.mainPostId;
                 final target = e.replyPostId;
                 final cs = Theme.of(context).colorScheme;
-                final app = context.watch<AppState>();
+                final settings = context.watch<SettingsController>();
                 final meta = Theme.of(context)
                     .textTheme
                     .labelSmall
                     ?.copyWith(color: cs.onSurfaceVariant);
 
                 final previewStyle = TextStyle(
-                  fontSize: app.contentFontSize,
-                  height: app.contentLineHeight,
-                  fontFamily: app.fontFamily.isEmpty ? null : app.fontFamily,
+                  fontSize: settings.contentFontSize,
+                  height: settings.contentLineHeight,
+                  fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
                 );
 
                 String fmtTime(DateTime dt) {
@@ -502,6 +505,7 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                           mainPostId: tid,
                           title: e.title,
                           flashPostId: target,
+                          initialPage: e.replyPage,
                         ),
                       ),
                     );
@@ -547,7 +551,7 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                         // ── Reply content ──
                         Text(
                           normalizeForListPreview(e.content.trim()),
-                          maxLines: app.previewMaxLines,
+                          maxLines: settings.previewMaxLines,
                           overflow: TextOverflow.ellipsis,
                           style: previewStyle,
                         ),
@@ -567,20 +571,27 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                                   e.threadThumbImageUrl!.trim().isNotEmpty) ...[
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(6),
-                                  child: Image.network(
-                                    e.threadThumbImageUrl!,
+                                  child: CdnFallbackCachedNetworkImage(
+                                    imageUrl: e.threadThumbImageUrl!,
                                     width: 48,
                                     height: 48,
                                     fit: BoxFit.cover,
-                                    cacheWidth: 48,
-                                    cacheHeight: 48,
-                                    errorBuilder: (_, __, ___) => Container(
+                                    placeholder: (context, url) => Container(
                                       width: 48,
                                       height: 48,
                                       color: cs.surfaceContainerHighest,
-                                      child: const Icon(
-                                          Icons.broken_image_outlined,
-                                          size: 20),
+                                      alignment: Alignment.center,
+                                      child: const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      ),
+                                    ),
+                                    errorWidget: (context, url, error) => Container(
+                                      width: 48,
+                                      height: 48,
+                                      color: cs.surfaceContainerHighest,
+                                      child: const Icon(Icons.broken_image_outlined, size: 20),
                                     ),
                                   ),
                                 ),
@@ -637,12 +648,12 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                                       normalizeForListPreview(
                                           e.threadContent?.trim() ??
                                               '（无内容）'),
-                    maxLines: app.previewMaxLines,
+                                      maxLines: settings.previewMaxLines,
                                       overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.merge(previewStyle),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.merge(previewStyle),
                                     ),
                                   ],
                                 ),

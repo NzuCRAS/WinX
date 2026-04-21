@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../app/app_state.dart';
+import '../../app/cookie_controller.dart';
 import 'qr_import_page.dart';
 
 final class UserManagePage extends StatefulWidget {
@@ -13,47 +13,51 @@ final class UserManagePage extends StatefulWidget {
 
 final class _UserManagePageState extends State<UserManagePage> {
   Future<void> _editCookieSlot(BuildContext context, String slotId) async {
-    final app = context.read<AppState>();
-    final slot = app.cookieSlots.firstWhere((s) => s.id == slotId);
+    final cookie = context.read<CookieController>();
+    final slot = cookie.slots.firstWhere((s) => s.id == slotId);
     final noteCtrl = TextEditingController(text: slot.note ?? '');
     final nav = Navigator.of(context);
 
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('编辑饼干槽'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: noteCtrl,
-              decoration: const InputDecoration(
-                labelText: '备注名（可选）',
+    try {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('编辑饼干槽'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: noteCtrl,
+                decoration: const InputDecoration(
+                  labelText: '备注名（可选）',
+                ),
               ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => nav.pop(false), child: const Text('取消')),
+            FilledButton(
+              onPressed: () => nav.pop(true),
+              child: const Text('保存'),
             ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => nav.pop(false), child: const Text('取消')),
-          FilledButton(
-            onPressed: () => nav.pop(true),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-
-    if (ok == true) {
-      await app.updateCookieSlotMeta(
-        slotId,
-        note: noteCtrl.text.trim().isEmpty ? null : noteCtrl.text.trim(),
       );
+
+      if (ok == true) {
+        await cookie.updateSlotMeta(
+          slotId,
+          note: noteCtrl.text.trim().isEmpty ? null : noteCtrl.text.trim(),
+        );
+      }
+    } finally {
+      noteCtrl.dispose();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final app = context.watch<AppState>();
+    final cookie = context.watch<CookieController>();
 
     return Scaffold(
       appBar: AppBar(title: const Text('用户管理')),
@@ -62,25 +66,25 @@ final class _UserManagePageState extends State<UserManagePage> {
         children: [
           Card(
             child: ListTile(
-              leading: Icon(app.hasCookie
+              leading: Icon(cookie.hasCookie
                   ? Icons.verified_user_outlined
                   : Icons.no_accounts_outlined),
-              title: Text(app.hasCookie ? '已导入饼干' : '未导入饼干'),
+              title: Text(cookie.hasCookie ? '已导入饼干' : '未导入饼干'),
               subtitle:
-                  Text(app.cookieName == null ? '（无饼干名）' : app.cookieName!),
+                  Text(cookie.cookieName == null ? '（无饼干名）' : cookie.cookieName!),
             ),
           ),
-          if (app.cookieSlots.isNotEmpty) ...[
+          if (cookie.slots.isNotEmpty) ...[
             const SizedBox(height: 8),
             Text('饼干槽', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 6),
             Card(
               child: Column(
                 children: [
-                  for (final slot in app.cookieSlots)
+                  for (final slot in cookie.slots)
                     ListTile(
                       leading: Icon(
-                        slot.id == app.activeCookieSlotId
+                        slot.id == cookie.activeSlotId
                             ? Icons.radio_button_checked
                             : Icons.radio_button_unchecked,
                       ),
@@ -95,14 +99,14 @@ final class _UserManagePageState extends State<UserManagePage> {
                         [
                           if (slot.note != null && slot.note!.trim().isNotEmpty)
                             '备注：${slot.note!.trim()}',
-                          if (slot.id == app.defaultPostCookieSlotId) '默认发言',
-                          if (slot.id == app.defaultAuthCookieSlotId) '鉴权',
+                          if (slot.id == cookie.defaultPostSlotId) '默认发言',
+                          if (slot.id == cookie.defaultAuthSlotId) '鉴权',
                         ].join(' · '),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
                       onTap: () => context
-                          .read<AppState>()
+                          .read<CookieController>()
                           .switchCookieSlot(slot.id),
                       trailing: Wrap(
                         spacing: 4,
@@ -114,27 +118,27 @@ final class _UserManagePageState extends State<UserManagePage> {
                           ),
                           IconButton(
                             tooltip: '设为默认发言饼干',
-                            onPressed: slot.id == app.defaultPostCookieSlotId
+                            onPressed: slot.id == cookie.defaultPostSlotId
                                 ? null
                                 : () => context
-                                    .read<AppState>()
-                                    .setDefaultPostCookieSlot(slot.id),
+                                    .read<CookieController>()
+                                    .setDefaultPostSlot(slot.id),
                             icon: const Icon(Icons.mode_comment_outlined),
                           ),
                           IconButton(
                             tooltip: '设为鉴权饼干',
-                            onPressed: slot.id == app.defaultAuthCookieSlotId
+                            onPressed: slot.id == cookie.defaultAuthSlotId
                                 ? null
                                 : () => context
-                                    .read<AppState>()
-                                    .setDefaultAuthCookieSlot(slot.id),
+                                    .read<CookieController>()
+                                    .setDefaultAuthSlot(slot.id),
                             icon: const Icon(Icons.verified_outlined),
                           ),
                           IconButton(
                             tooltip: '删除',
                             onPressed: () async {
                               final nav = Navigator.of(context);
-                              final appState = context.read<AppState>();
+                              final cookieController = context.read<CookieController>();
                               final ok = await showDialog<bool>(
                                 context: context,
                                 builder: (context) => AlertDialog(
@@ -154,7 +158,7 @@ final class _UserManagePageState extends State<UserManagePage> {
                               );
                               if (ok == true) {
                                 if (!mounted) return;
-                                await appState.deleteCookieSlot(slot.id);
+                                await cookieController.deleteSlot(slot.id);
                               }
                             },
                             icon: const Icon(Icons.delete_outline),
@@ -178,11 +182,11 @@ final class _UserManagePageState extends State<UserManagePage> {
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
-            onPressed: app.cookieSlots.isNotEmpty
+            onPressed: cookie.slots.isNotEmpty
                 ? () async {
                     final nav = Navigator.of(context);
                     final messenger = ScaffoldMessenger.of(context);
-                    final appState = context.read<AppState>();
+                    final cookieController = context.read<CookieController>();
                     final ok = await showDialog<bool>(
                       context: context,
                       builder: (context) => AlertDialog(
@@ -200,7 +204,7 @@ final class _UserManagePageState extends State<UserManagePage> {
                     );
                     if (ok == true) {
                       if (!mounted) return;
-                      await appState.clearAllCookies();
+                      await cookieController.clearAll();
                       if (!mounted) return;
                       messenger.showSnackBar(
                         const SnackBar(content: Text('已清除全部饼干')),

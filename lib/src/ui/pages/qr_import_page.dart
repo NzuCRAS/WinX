@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 
-import '../../app/app_state.dart';
+import '../../app/cookie_controller.dart';
 import '../../data/qr_cookie.dart';
 import '../../data/qr_image_decoder.dart';
 
@@ -33,7 +33,7 @@ final class _QrImportPageState extends State<QrImportPage> {
     try {
       final payload = QrCookiePayload.fromJsonString(raw);
       final cookie = payload.toXdnmbCookie();
-      await context.read<AppState>().importCookie(cookie: cookie);
+      await context.read<CookieController>().importCookie(cookie: cookie);
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('饼干导入成功')));

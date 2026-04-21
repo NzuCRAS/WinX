@@ -32,6 +32,8 @@ final class PostHistoryEntry {
   final int? threadReplyCount;
   final String? threadThumbImageUrl;
   final String? threadContent;
+  /// Page number where the reply lives (1-based). Null for new-thread entries.
+  final int? replyPage;
 
   const PostHistoryEntry({
   this.id,
@@ -48,6 +50,7 @@ final class PostHistoryEntry {
   this.threadReplyCount,
   this.threadThumbImageUrl,
   this.threadContent,
+    this.replyPage,
   });
 }
 

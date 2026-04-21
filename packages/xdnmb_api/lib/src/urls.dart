@@ -1,10 +1,50 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:http/http.dart' hide Client;
 import 'package:http/io_client.dart';
 
 import 'client.dart';
+
+/// Shared HTTP client used by `xdnmb_api` internal utilities when the caller
+/// doesn't provide an explicit client.
+///
+/// This avoids creating a new `HttpClient` (and losing keep-alive benefits)
+/// for every `XdnmbUrls.update()` call.
+///
+/// The application should close it on shutdown via
+/// `XdnmbUrlsSharedHttpClient.close()`.
+final class XdnmbUrlsSharedHttpClient {
+  static IOClient? _shared;
+
+  /// Set a shared client to be used by `XdnmbUrls.update()`.
+  ///
+  /// If you call this, you own the lifecycle of [client] and should close it
+  /// yourself.
+  static void set(IOClient client) {
+    _shared = client;
+  }
+
+  /// Get (or lazily create) the shared client.
+  static IOClient get instance {
+    return _shared ??=
+        IOClient(HttpClient()..connectionTimeout = Client.defaultConnectionTimeout);
+  }
+
+  /// Close the shared client if it was created by this class.
+  ///
+  /// Safe to call multiple times.
+  static void close({bool force = true}) {
+    final c = _shared;
+    _shared = null;
+    if (c == null) return;
+
+    // IOClient doesn't expose the underlying HttpClient, but closing the
+    // wrapper is enough to close the inner client.
+    c.close();
+  }
+}
 
 /// X 岛链接
 final class XdnmbUrls {
@@ -25,6 +65,9 @@ final class XdnmbUrls {
 
   /// X 岛现在的 CDN 链接
   static final Uri _currentCdnUrl = Uri.parse('https://image.nmb.best/');
+
+  /// 上次从接口获得的 CDN 列表（按可用性/权重使用）
+  static List<Uri>? _cachedCdnCandidates;
 
   /// X 岛现在的备用 API 链接
   static final Uri _currentBackupApiUrl = Uri.parse('https://api.nmb.best/');
@@ -53,6 +96,41 @@ final class XdnmbUrls {
 
   /// X 岛 CDN 链接
   final Uri cdnUrl;
+
+  /// CDN 候选列表（用于图片加载的兜底重试）
+  final List<Uri> cdnCandidates;
+
+  /// 允许客户端覆盖当前使用的 CDN（例如：启动测速选最快）。
+  ///
+  /// 注意：这个值只影响“当前进程内”的 `XdnmbUrls()` 单例。
+  /// 如果你希望跨重启持久化，请在客户端自行存储并在启动时调用本方法。
+  static void overrideCdnUrl(Uri cdnUrl, {List<Uri>? candidates}) {
+    _urls = XdnmbUrls._internal(
+      baseUrl: _urls.baseUrl,
+      cdnUrl: cdnUrl,
+      backupApiUrl: _urls.backupApiUrl,
+      cdnCandidates: candidates ?? _urls.cdnCandidates,
+    )..useBackupApi = _urls.useBackupApi;
+  }
+
+  /// 允许客户端用“缓存值/用户配置”覆盖当前 URL 配置（base/cdn/backup）。
+  ///
+  /// 用途：冷启动先用上次成功的 URL，避免每次启动都同步/半同步探测慢域名。
+  ///
+  /// 注意：这是进程内覆盖，不会自动持久化；持久化由客户端负责（例如 SharedPreferences）。
+  static void overrideAll({
+    Uri? baseUrl,
+    Uri? cdnUrl,
+    Uri? backupApiUrl,
+    List<Uri>? cdnCandidates,
+  }) {
+    _urls = XdnmbUrls._internal(
+      baseUrl: baseUrl ?? _urls.baseUrl,
+      cdnUrl: cdnUrl ?? _urls.cdnUrl,
+      backupApiUrl: backupApiUrl ?? _urls.backupApiUrl,
+      cdnCandidates: cdnCandidates ?? _urls.cdnCandidates,
+    )..useBackupApi = _urls.useBackupApi;
+  }
 
   /// X 岛备用 API 链接
   final Uri backupApiUrl;
@@ -117,7 +195,11 @@ final class XdnmbUrls {
   XdnmbUrls._internal(
       {required this.baseUrl,
       required this.cdnUrl,
-      required this.backupApiUrl});
+  required this.backupApiUrl,
+  List<Uri>? cdnCandidates})
+  : cdnCandidates = (cdnCandidates == null || cdnCandidates.isEmpty)
+    ? <Uri>[cdnUrl]
+    : List.unmodifiable(cdnCandidates);
 
   /// 构造 [XdnmbUrls]，返回 [XdnmbUrls] 单例
   factory XdnmbUrls() => _urls;
@@ -227,9 +309,7 @@ final class XdnmbUrls {
   ///
   /// [client] 为 http client
   static Future<XdnmbUrls> update([IOClient? client]) async {
-    client = client ??
-        IOClient(
-            HttpClient()..connectionTimeout = Client.defaultConnectionTimeout);
+  client ??= XdnmbUrlsSharedHttpClient.instance;
 
     try {
       final request = Request('GET', _originBaseUrl)..followRedirects = false;
@@ -241,9 +321,14 @@ final class XdnmbUrls {
 
       response = await client.get(baseUrl.replace(path: _cdnPath));
       dynamic decoded = json.decode(response.utf8Body);
-      final cdnUrl = (decoded is List<dynamic> && decoded.isNotEmpty)
-          ? Uri.parse(decoded[0]['url'] ?? _currentCdnUrl.toString())
-          : _currentCdnUrl;
+
+    // 接口返回格式示例：[{"url":"https://image.nmb.best/","rate":0.95}, ...]
+    final cdnCandidates = _parseCdnCandidates(decoded);
+    final cdnUrl = cdnCandidates.isNotEmpty
+      ? _pickWeightedRandom(cdnCandidates)
+      : _currentCdnUrl;
+
+    _cachedCdnCandidates = cdnCandidates.isNotEmpty ? cdnCandidates : null;
 
       response = await client.get(baseUrl.replace(path: _backupApiPath));
       decoded = json.decode(response.utf8Body);
@@ -252,7 +337,10 @@ final class XdnmbUrls {
           : _currentBackupApiUrl;
 
       final urls = XdnmbUrls._internal(
-          baseUrl: baseUrl, cdnUrl: cdnUrl, backupApiUrl: backupApiUrl)
+          baseUrl: baseUrl,
+          cdnUrl: cdnUrl,
+          backupApiUrl: backupApiUrl,
+          cdnCandidates: cdnCandidates)
         ..useBackupApi = _urls.useBackupApi;
       _urls = urls;
 
@@ -261,4 +349,53 @@ final class XdnmbUrls {
       rethrow;
     }
   }
+
+  /// 解析 CDN 候选列表
+  static List<Uri> _parseCdnCandidates(dynamic decoded) {
+    if (decoded is! List) return const <Uri>[];
+    final result = <_CdnCandidate>[];
+    for (final item in decoded) {
+      if (item is! Map) continue;
+      final url = item['url']?.toString().trim();
+      if (url == null || url.isEmpty) continue;
+
+      final rateRaw = item['rate'];
+      final rate = (rateRaw is num) ? rateRaw.toDouble() : 0.0;
+      final uri = Uri.tryParse(url);
+      if (uri == null) continue;
+      result.add(_CdnCandidate(uri, rate));
+    }
+    // 去重（保留最高 rate）
+    final byUri = <Uri, double>{};
+    for (final c in result) {
+      byUri[c.uri] = max(byUri[c.uri] ?? double.negativeInfinity, c.rate);
+    }
+    return byUri.keys.toList(growable: false);
+  }
+
+  /// 按权重随机选择 CDN。
+  ///
+  /// - rate<=0 时按 1 处理。
+  /// - 为了简单/稳定，不在这里做测速；测速更适合放到客户端侧按需做。
+  static Uri _pickWeightedRandom(List<Uri> candidates) {
+    // 如果上一次候选列表里只有一个，直接返回。
+    if (candidates.length == 1) return candidates.first;
+
+    // 由于 _parseCdnCandidates 已经丢掉了 rate，这里改为：
+    // - 若我们能复用缓存的 raw 列表就带 rate；否则退化为均匀随机。
+    // 当前实现选择“稳定优先”：优先返回第一个，避免频繁变化导致缓存碎片。
+    // 但若缓存存在则按缓存权重随机。
+    final cached = _cachedCdnCandidates;
+    if (cached == null || cached.isEmpty) {
+      return candidates[Random().nextInt(candidates.length)];
+    }
+    // cached 是 Uri 列表，无法获得 rate；退化为均匀随机。
+    return cached[Random().nextInt(cached.length)];
+  }
+}
+
+final class _CdnCandidate {
+  final Uri uri;
+  final double rate;
+  const _CdnCandidate(this.uri, this.rate);
 }

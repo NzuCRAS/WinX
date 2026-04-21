@@ -11,6 +11,16 @@ import 'package:http_parser/http_parser.dart';
 import 'urls.dart';
 import 'xdnmb.dart';
 
+const bool _perfEnabled = bool.fromEnvironment('XDNMB_PERF_LOG', defaultValue: false);
+
+void _perfLog(String message) {
+  if (!_perfEnabled) return;
+  developer.log(message, name: 'xdnmb.perf');
+  // Also print to terminal for `flutter run` visibility.
+  // ignore: avoid_print
+  print('[xdnmb.perf] $message');
+}
+
 /// 将 cookie 列表转化为 cookie 值
 String _toCookies(Iterable<String> cookies) => cookies.join('; ');
 
@@ -228,9 +238,7 @@ class Client extends IOClient {
         }
         
         // 只对网络相关错误进行重试
-        if (e is SocketException || 
-            e is HandshakeException || 
-            e is HttpStatusException) {
+        if (e is SocketException || e is HttpStatusException) {
           // 指数退避策略
           final delay = Duration(milliseconds: retryDelayBase * pow(2, attempts - 1).toInt());
           developer.log('网络请求失败，$delay 后重试 ($attempts/$maxRetryCount): $e', name: 'xdnmb.network');
@@ -322,7 +330,51 @@ class Client extends IOClient {
 
   @override
   Future<IOStreamedResponse> send(BaseRequest request) async {
-    final response = await super.send(request);
+    final sw = _perfEnabled ? (Stopwatch()..start()) : null;
+    final tag = _perfEnabled
+        ? 'http ${request.method} ${request.url.host}${request.url.path}'
+        : null;
+
+    IOStreamedResponse response;
+    try {
+      response = await super.send(request);
+    } catch (e) {
+      if (sw != null) {
+        sw.stop();
+        _perfLog(
+          '$tag stage=send.error totalMs=${sw.elapsedMilliseconds} err=$e',
+        );
+      }
+      rethrow;
+    }
+
+    if (sw != null) {
+      // super.send() returns after headers are available.
+      _perfLog(
+        '$tag stage=ttfb ms=${sw.elapsedMilliseconds} status=${response.statusCode} clen=${response.contentLength}',
+      );
+
+      // Drain the stream once to measure download time, while still returning
+      // a streamed response to callers.
+      // NOTE: This adds overhead and disables true streaming, but it's behind a
+      // perf flag and is only meant for diagnosis.
+      final ttfbMs = sw.elapsedMilliseconds;
+      final bytes = await response.stream.toBytes();
+      final totalMs = sw.elapsedMilliseconds;
+      _perfLog(
+        '$tag stage=body totalMs=$totalMs bodyMs=${totalMs - ttfbMs} bytes=${bytes.length} status=${response.statusCode}',
+      );
+
+      // Re-create a response with the drained bytes.
+      response = IOStreamedResponse(ByteStream.fromBytes(bytes), response.statusCode,
+          contentLength: bytes.length,
+          request: response.request,
+          headers: response.headers,
+          isRedirect: response.isRedirect,
+          persistentConnection: response.persistentConnection,
+          reasonPhrase: response.reasonPhrase);
+      sw.stop();
+    }
 
     // 获取 xdnmbPhpSessionId 和_xdnmbBackupApiPhpSessionId
     final setCookie = response.headers[HttpHeaders.setCookieHeader];

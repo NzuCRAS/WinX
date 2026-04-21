@@ -1,61 +1,121 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:http/io_client.dart';
 import 'package:xdnmb_api/xdnmb_api.dart';
 
 import '../data/cookie_store.dart';
+import '../data/cdn_selector.dart';
 import '../data/local_prefs.dart';
 import '../data/xdnmb_repository.dart';
 import '../ui/app_navigator.dart';
+import '../data/perf_log.dart';
+import 'composer_controller.dart';
+import 'cookie_controller.dart';
+import 'settings_controller.dart';
 
+/// App-wide state coordinator.
+///
+/// Delegates cookie and settings concerns to dedicated controllers so that
+/// UI pages can subscribe to only what they need.
 final class AppState extends ChangeNotifier {
   final CookieStore cookieStore;
   final LocalPrefs prefs;
   late final XdnmbApi api;
   late final XdnmbRepository repo;
+  late final CdnSelector cdnSelector;
+  late final CookieController cookie;
+  late final SettingsController settings;
+  late final ComposerController composer;
+
+  // Keep a single HttpClient for the whole app lifecycle so connections can be
+  // reused (keep-alive) across requests.
+  HttpClient? _httpClient;
 
   bool initialized = false;
-  List<CookieSlot> cookieSlots = const [];
-  String? activeCookieSlotId;
-  String? defaultPostCookieSlotId;
-  String? defaultAuthCookieSlotId;
-  String? cookieName;
-
-  // Settings
-  double contentFontSize = LocalPrefs.defaultContentFontSize;
-  double contentLineHeight = LocalPrefs.defaultContentLineHeight;
-  ThemeMode themeMode = ThemeMode.system;
-  int previewMaxLines = LocalPrefs.defaultPreviewMaxLines;
-  String fontFamily = LocalPrefs.defaultFontFamily;
-  bool autoLoadOnScroll = LocalPrefs.defaultAutoLoadOnScroll;
-  bool showImageInThread = LocalPrefs.defaultShowImageInThread;
-  double threadPreloadDistance = LocalPrefs.defaultThreadPreloadDistance;
 
   AppState({CookieStore? cookieStore, LocalPrefs? prefs})
       : cookieStore = cookieStore ?? CookieStore(),
         prefs = prefs ?? LocalPrefs();
 
   Future<void> init() async {
-    cookieSlots = await cookieStore.readSlots();
-    activeCookieSlotId = await cookieStore.readActiveSlotId();
+    final sw = Stopwatch()..start();
+    PerfLog.log('app.init start');
+
+    _httpClient = HttpClient();
+    _httpClient!.connectionTimeout = const Duration(seconds: 15);
+    _httpClient!.idleTimeout = const Duration(seconds: 90);
+
+    // Load cookies first so we know which userhash to use for API init.
+    final slots = await cookieStore.readSlots();
+    final activeId = await cookieStore.readActiveSlotId();
     final defaultPost = await cookieStore.readDefaultPostSlot();
     final defaultAuth = await cookieStore.readDefaultAuthSlot();
-    defaultPostCookieSlotId = defaultPost?.id;
-    defaultAuthCookieSlotId = defaultAuth?.id;
 
-    // For general browsing, prefer auth cookie if present.
     final CookieSlot? browsingSlot = defaultAuth ?? await cookieStore.readActiveSlot();
-    cookieName = browsingSlot?.name;
 
-    api = XdnmbApi(userHash: browsingSlot?.userHash);
-    // Ensure cookie is actually sent as Cookie header via SDK.
+    XdnmbUrlsSharedHttpClient.set(IOClient(_httpClient!));
+    api = XdnmbApi(userHash: browsingSlot?.userHash, client: _httpClient);
     if (browsingSlot != null) {
       api.xdnmbCookie = XdnmbCookie(browsingSlot.userHash, name: browsingSlot.name);
     }
-  repo = XdnmbRepository(api);
-    // Optional: show auth debug info in a dialog to avoid relying on console logs.
+    repo = XdnmbRepository(api);
+
+    // Wire up controllers.
+    cookie = CookieController(
+      store: cookieStore,
+      api: api,
+      repo: repo,
+    );
+    // Seed controller with already-loaded values (avoids second DB read).
+    cookie
+      ..slots = slots
+      ..activeSlotId = activeId
+      ..defaultPostSlotId = defaultPost?.id
+      ..defaultAuthSlotId = defaultAuth?.id
+      ..cookieName = browsingSlot?.name;
+
+    settings = SettingsController(prefs: prefs);
+    settings.onDebugLogChanged = (v) => repo.enableDebugLog = v;
+    settings.onThreadCacheTtlChanged = (v) =>
+        repo.setThreadCacheTtl(Duration(minutes: v));
+    await settings.init();
+
+    composer = ComposerController();
+    repo.enableDebugLog = settings.enableDebugLog;
+    repo.setThreadCacheTtl(Duration(minutes: settings.threadCacheTtlMinutes));
+
+    PerfLog.log('app.init cookies+settings durMs=${sw.elapsedMilliseconds}');
+
+    // ---- URL cache (cold-start speed-up) ----
+    try {
+      final cache = await prefs.getUrlCache();
+      if (cache.baseUrl != null ||
+          cache.cdnUrl != null ||
+          cache.backupApiUrl != null ||
+          (cache.cdnCandidates != null && cache.cdnCandidates!.isNotEmpty)) {
+        XdnmbUrls.overrideAll(
+          baseUrl: cache.baseUrl,
+          cdnUrl: cache.cdnUrl,
+          backupApiUrl: cache.backupApiUrl,
+          cdnCandidates: cache.cdnCandidates,
+        );
+        PerfLog.log(
+          'app.urlCache.apply ok updatedAt=${cache.updatedAt?.toIso8601String() ?? 'null'}',
+        );
+      } else {
+        PerfLog.log('app.urlCache.apply skip');
+      }
+    } catch (e) {
+      PerfLog.log('app.urlCache.apply err=$e');
+    }
+
+    cdnSelector = CdnSelector(
+      candidatesProvider: () => XdnmbUrls().cdnCandidates,
+    );
     repo.debugShow = (title, message) {
       final ctx = AppNavigator.navigatorKey.currentContext;
       if (ctx == null) return;
-      // Fire-and-forget; dialog dismissal is user-driven.
       // ignore: discarded_futures
       showDialog<void>(
         context: ctx,
@@ -71,245 +131,65 @@ final class AppState extends ChangeNotifier {
         ),
       );
     };
-  // Provide explicit auth cookie fallback.
-  repo.setAuthCookie(defaultAuth?.userHash == null
-    ? null
-    : XdnmbCookie(defaultAuth!.userHash, name: defaultAuth.name).cookie);
-
-    // Load user settings.
-    contentFontSize = await prefs.getContentFontSize();
-    contentLineHeight = await prefs.getContentLineHeight();
-    previewMaxLines = await prefs.getPreviewMaxLines();
-    fontFamily = await prefs.getFontFamily();
-    autoLoadOnScroll = await prefs.getAutoLoadOnScroll();
-    showImageInThread = await prefs.getShowImageInThread();
-    threadPreloadDistance = await prefs.getThreadPreloadDistance();
-    final tm = await prefs.getThemeMode();
-    themeMode = switch (tm) {
-      'light' => ThemeMode.light,
-      'dark' => ThemeMode.dark,
-      _ => ThemeMode.system,
-    };
+    repo.setAuthCookie(defaultAuth?.userHash == null
+        ? null
+        : XdnmbCookie(defaultAuth!.userHash, name: defaultAuth.name).cookie);
 
     // Mark app as ready for UI immediately.
     initialized = true;
     notifyListeners();
 
+    sw.stop();
+    PerfLog.log('app.init ready durMs=${sw.elapsedMilliseconds}');
+
     // Best-effort URL update; don't block app start on failure.
-    // If this fails (e.g. TLS handshake), the user should still see the app UI
-    // and can retry by refreshing.
     // ignore: discarded_futures
-    _warmUpNetwork();
+    PerfLog.time('app.warmUpNetwork', _warmUpNetwork);
+
+    // CDN 测速：不阻塞启动。
+    // ignore: discarded_futures
+    PerfLog.time('app.cdnSelector.start', () async {
+      await cdnSelector.start();
+    });
   }
 
   Future<void> _warmUpNetwork() async {
     try {
       await repo.updateUrls();
+      try {
+        final urls = XdnmbUrls();
+        await prefs.setUrlCache(
+          baseUrl: urls.baseUrl,
+          cdnUrl: urls.cdnUrl,
+          backupApiUrl: urls.backupApiUrl,
+          cdnCandidates: urls.cdnCandidates,
+          updatedAt: DateTime.now(),
+        );
+        PerfLog.log('app.urlCache.save ok');
+      } catch (e) {
+        PerfLog.log('app.urlCache.save err=$e');
+      }
     } catch (_) {
       // ignore
     }
   }
 
-  bool get hasCookie => api.xdnmbCookie != null;
-
-  /// Cookie header value used for posting/replying.
-  ///
-  /// We always prefer the user's configured "default post" cookie slot.
-  /// Returns the full cookie header value (e.g. `userhash=%CD%02...`).
-  String? get defaultPostCookieHeader {
-    final slot = defaultPostCookieSlot;
-    if (slot == null) return null;
-    return XdnmbCookie(slot.userHash, name: slot.name).cookie;
-  }
-
-  CookieSlot? _findSlot(String? id) {
-    if (id == null) return null;
-    for (final s in cookieSlots) {
-      if (s.id == id) return s;
-    }
-    return null;
-  }
-
-  CookieSlot? get defaultPostCookieSlot => _findSlot(defaultPostCookieSlotId);
-  CookieSlot? get defaultAuthCookieSlot => _findSlot(defaultAuthCookieSlotId);
-
-  CookieSlot? get activeCookieSlot {
-    if (cookieSlots.isEmpty) return null;
-    final id = activeCookieSlotId;
-    if (id == null) return cookieSlots.first;
-    return cookieSlots.firstWhere((s) => s.id == id,
-        orElse: () => cookieSlots.first);
-  }
-
-  Future<void> importCookie({required XdnmbCookie cookie}) async {
-    api.xdnmbCookie = cookie;
-    await cookieStore.upsertSlot(userHash: cookie.userHash, name: cookie.name);
-
-    // Make the imported cookie actually take effect for both browsing and auth.
-    // upsertSlot() already activates the slot; we reuse the active slot id.
-    final slotId = await cookieStore.readActiveSlotId();
-    if (slotId != null) {
-      await cookieStore.setDefaultAuthSlot(slotId);
-      await cookieStore.setDefaultPostSlot(slotId);
+  @override
+  void dispose() {
+    composer.dispose();
+    try {
+      repo.dispose();
+    } catch (_) {}
+    try {
+      api.close();
+    } catch (_) {
+      // ignore any late init errors
     }
 
-  cookieSlots = await cookieStore.readSlots();
-  activeCookieSlotId = await cookieStore.readActiveSlotId();
-  final defaultPost = await cookieStore.readDefaultPostSlot();
-  final defaultAuth = await cookieStore.readDefaultAuthSlot();
-  defaultPostCookieSlotId = defaultPost?.id;
-  defaultAuthCookieSlotId = defaultAuth?.id;
-    cookieName = cookie.name;
-    notifyListeners();
-  }
-
-  Future<void> switchCookieSlot(String slotId) async {
-    await cookieStore.setActiveSlot(slotId);
-    activeCookieSlotId = slotId;
-    final slot = (await cookieStore.readActiveSlot());
-    api.xdnmbCookie = slot == null ? null : XdnmbCookie(slot.userHash, name: slot.name);
-    cookieName = slot?.name;
-    notifyListeners();
-  }
-
-  Future<void> updateCookieSlotMeta(
-    String slotId, {
-    String? name,
-    String? note,
-  }) async {
-    await cookieStore.updateSlot(slotId, name: name, note: note);
-    cookieSlots = await cookieStore.readSlots();
-    // Refresh derived ids.
-    final defaultPost = await cookieStore.readDefaultPostSlot();
-    final defaultAuth = await cookieStore.readDefaultAuthSlot();
-    defaultPostCookieSlotId = defaultPost?.id;
-    defaultAuthCookieSlotId = defaultAuth?.id;
-  repo.setAuthCookie(defaultAuth?.userHash == null
-    ? null
-    : XdnmbCookie(defaultAuth!.userHash, name: defaultAuth.name).cookie);
-    notifyListeners();
-  }
-
-  Future<void> setDefaultPostCookieSlot(String slotId) async {
-    await cookieStore.setDefaultPostSlot(slotId);
-    cookieSlots = await cookieStore.readSlots();
-    final defaultPost = await cookieStore.readDefaultPostSlot();
-    defaultPostCookieSlotId = defaultPost?.id;
-    notifyListeners();
-  }
-
-  Future<void> setDefaultAuthCookieSlot(String slotId) async {
-    await cookieStore.setDefaultAuthSlot(slotId);
-    cookieSlots = await cookieStore.readSlots();
-    final defaultAuth = await cookieStore.readDefaultAuthSlot();
-    defaultAuthCookieSlotId = defaultAuth?.id;
-
-    // Apply auth cookie to API immediately (browsing may require it).
-    final slot = _findSlot(slotId);
-    api.xdnmbCookie = slot == null ? null : XdnmbCookie(slot.userHash, name: slot.name);
-    cookieName = slot?.name;
-
-  repo.setAuthCookie(slot == null ? null : XdnmbCookie(slot.userHash, name: slot.name).cookie);
-
-  // Switching auth cookie should invalidate caches in case previous loads
-  // were denied and cached upstream states.
-  repo.clearCaches();
-    notifyListeners();
-  }
-
-  Future<void> deleteCookieSlot(String slotId) async {
-    await cookieStore.deleteSlot(slotId);
-    cookieSlots = await cookieStore.readSlots();
-    activeCookieSlotId = await cookieStore.readActiveSlotId();
-  final defaultPost = await cookieStore.readDefaultPostSlot();
-  final defaultAuth = await cookieStore.readDefaultAuthSlot();
-  defaultPostCookieSlotId = defaultPost?.id;
-  defaultAuthCookieSlotId = defaultAuth?.id;
-  repo.setAuthCookie(defaultAuth?.userHash == null
-    ? null
-    : XdnmbCookie(defaultAuth!.userHash, name: defaultAuth.name).cookie);
-    final slot = await cookieStore.readActiveSlot();
-    api.xdnmbCookie = slot == null ? null : XdnmbCookie(slot.userHash, name: slot.name);
-    cookieName = slot?.name;
-    notifyListeners();
-  }
-
-  Future<void> clearAllCookies() async {
-    api.xdnmbCookie = null;
-    await cookieStore.clearAll();
-    cookieSlots = const [];
-    activeCookieSlotId = null;
-  defaultPostCookieSlotId = null;
-  defaultAuthCookieSlotId = null;
-  repo.clearCaches();
-  repo.setAuthCookie(null);
-    cookieName = null;
-    notifyListeners();
-  }
-
-  // ── Settings ──
-
-  Future<void> setContentFontSize(double value) async {
-    contentFontSize = value;
-    await prefs.setContentFontSize(value);
-    notifyListeners();
-  }
-
-  Future<void> setContentLineHeight(double value) async {
-    contentLineHeight = value;
-    await prefs.setContentLineHeight(value);
-    notifyListeners();
-  }
-
-  Future<void> setThemeMode(ThemeMode mode) async {
-    themeMode = mode;
-    final s = switch (mode) {
-      ThemeMode.light => 'light',
-      ThemeMode.dark => 'dark',
-      _ => 'system',
-    };
-    await prefs.setThemeMode(s);
-    notifyListeners();
-  }
-
-  Future<void> setPreviewMaxLines(int value) async {
-    previewMaxLines = value;
-    await prefs.setPreviewMaxLines(value);
-    notifyListeners();
-  }
-
-  Future<void> setFontFamily(String value) async {
-    fontFamily = value;
-    await prefs.setFontFamily(value);
-    notifyListeners();
-  }
-
-  Future<void> setAutoLoadOnScroll(bool value) async {
-    autoLoadOnScroll = value;
-    await prefs.setAutoLoadOnScroll(value);
-    notifyListeners();
-  }
-
-  Future<void> setShowImageInThread(bool value) async {
-    showImageInThread = value;
-    await prefs.setShowImageInThread(value);
-    notifyListeners();
-  }
-
-  Future<void> setThreadPreloadDistance(double value) async {
-    threadPreloadDistance = value;
-    await prefs.setThreadPreloadDistance(value);
-    notifyListeners();
-  }
-
-  Future<void> resetSettings() async {
-    await setContentFontSize(LocalPrefs.defaultContentFontSize);
-    await setContentLineHeight(LocalPrefs.defaultContentLineHeight);
-    await setThemeMode(ThemeMode.system);
-    await setPreviewMaxLines(LocalPrefs.defaultPreviewMaxLines);
-    await setFontFamily(LocalPrefs.defaultFontFamily);
-    await setAutoLoadOnScroll(LocalPrefs.defaultAutoLoadOnScroll);
-    await setShowImageInThread(LocalPrefs.defaultShowImageInThread);
-    await setThreadPreloadDistance(LocalPrefs.defaultThreadPreloadDistance);
+    final c = _httpClient;
+    _httpClient = null;
+    c?.close(force: true);
+    XdnmbApi.closeSharedHttpClient();
+    super.dispose();
   }
 }

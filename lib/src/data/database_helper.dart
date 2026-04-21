@@ -5,12 +5,13 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'history_store.dart';
+import 'local_prefs.dart';
 import 'post_history_store.dart';
 
 /// SQLite数据库管理器
 final class DatabaseHelper {
   static const _databaseName = 'xdnmb.db';
-  static const _databaseVersion = 1;
+  static const _databaseVersion = 2;
 
   // 表名
   static const _tableHistory = 'history';
@@ -34,18 +35,25 @@ final class DatabaseHelper {
 
   /// 初始化数据库
   Future<Database> _initDatabase() async {
+    final sw = Stopwatch()..start();
+
     String baseDir;
     try {
-      final documentsDirectory = await getApplicationDocumentsDirectory();
-      baseDir = documentsDirectory.path;
-
-      if (kDebugMode) {
-        debugPrint('Database dir (documents): $baseDir');
-        try {
-          final dirExists = await documentsDirectory.exists();
-          debugPrint('Database dir exists: $dirExists ($baseDir)');
-        } catch (e) {
-          debugPrint('Database dir exists check failed: $e');
+      final customDir = await LocalPrefs().getDatabaseDirectory();
+      if (customDir != null && customDir.isNotEmpty) {
+        baseDir = customDir;
+        if (kDebugMode) debugPrint('Database dir (custom): $baseDir');
+      } else {
+        final documentsDirectory = await getApplicationDocumentsDirectory();
+        baseDir = documentsDirectory.path;
+        if (kDebugMode) {
+          debugPrint('Database dir (documents): $baseDir');
+          try {
+            final dirExists = await documentsDirectory.exists();
+            debugPrint('Database dir exists: $dirExists ($baseDir)');
+          } catch (e) {
+            debugPrint('Database dir exists check failed: $e');
+          }
         }
       }
     } on MissingPluginException {
@@ -56,21 +64,32 @@ final class DatabaseHelper {
 
     final dbPath = path.join(baseDir, _databaseName);
     if (kDebugMode) debugPrint('Database path: $dbPath');
-  // NOTE: Don't call `databaseExists()` here.
-  // On Windows, `databaseExists()` may require a databaseFactory to be
-  // initialized (sqflite_common_ffi). We rely on `openDatabase()` below to
-  // create the db file when needed.
+    if (kDebugMode) debugPrint('Database init: resolved path durMs=${sw.elapsedMilliseconds}');
 
-    return await openDatabase(
+    // NOTE: Don't call `databaseExists()` here.
+    // On Windows, `databaseExists()` may require a databaseFactory to be
+    // initialized (sqflite_common_ffi). We rely on `openDatabase()` below to
+    // create the db file when needed.
+
+    final db = await openDatabase(
       dbPath,
       version: _databaseVersion,
       onCreate: (db, version) async {
-  if (kDebugMode) debugPrint('Creating database tables...');
+        final t0 = Stopwatch()..start();
+        if (kDebugMode) debugPrint('Creating database tables...');
         await _onCreate(db, version);
-  if (kDebugMode) debugPrint('Database tables created successfully');
+        t0.stop();
+        if (kDebugMode) {
+          debugPrint('Database tables created successfully');
+          debugPrint('Database init: onCreate durMs=${t0.elapsedMilliseconds}');
+        }
       },
       onUpgrade: _onUpgrade,
     );
+
+    sw.stop();
+    if (kDebugMode) debugPrint('Database init: openDatabase totalDurMs=${sw.elapsedMilliseconds}');
+    return db;
   }
 
   /// 创建数据库表
@@ -107,7 +126,8 @@ final class DatabaseHelper {
         thread_post_time TEXT,
         thread_reply_count INTEGER,
         thread_thumb_image_url TEXT,
-        thread_content TEXT
+        thread_content TEXT,
+        reply_page INTEGER
       )
     ''');
 
@@ -119,10 +139,12 @@ final class DatabaseHelper {
 
   /// 升级数据库
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // 在这里处理数据库版本升级
-    if (oldVersion < newVersion) {
-      // 示例：添加新列
-      // await db.execute('ALTER TABLE $_tableHistory ADD COLUMN new_column TEXT');
+    if (oldVersion < 2) {
+      final columns = await db.rawQuery('PRAGMA table_info($_tablePostHistory)');
+      final hasReplyPage = columns.any((c) => c['name'] == 'reply_page');
+      if (!hasReplyPage) {
+        await db.execute('ALTER TABLE $_tablePostHistory ADD COLUMN reply_page INTEGER');
+      }
     }
   }
 
@@ -238,6 +260,7 @@ final class DatabaseHelper {
         'thread_reply_count': entry.threadReplyCount,
         'thread_thumb_image_url': entry.threadThumbImageUrl,
         'thread_content': entry.threadContent,
+        'reply_page': entry.replyPage,
       },
   conflictAlgorithm: ConflictAlgorithm.abort,
     );
@@ -275,6 +298,7 @@ final class DatabaseHelper {
         threadReplyCount: maps[i]['thread_reply_count'],
         threadThumbImageUrl: maps[i]['thread_thumb_image_url'],
         threadContent: maps[i]['thread_content'],
+        replyPage: maps[i]['reply_page'],
       );
     });
     return entries;

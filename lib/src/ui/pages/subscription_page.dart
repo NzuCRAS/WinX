@@ -311,6 +311,7 @@ final class _SubscriptionPageState extends State<SubscriptionPage> {
 
                           return ThreadListItem(
                             thumbUrl: thumbUrl,
+                            isSage: f.isSage,
                             title: title,
                             content: f.content,
                             cookie: f.userHash,

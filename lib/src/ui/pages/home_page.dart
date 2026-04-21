@@ -1,8 +1,13 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:xdnmb_api/xdnmb_api.dart' as api;
 
 import '../../app/app_state.dart';
+import '../../app/composer_controller.dart';
+import '../../app/cookie_controller.dart';
+import '../../app/settings_controller.dart';
 import 'thread_page.dart';
 import 'start_page.dart';
 import 'history_page.dart';
@@ -10,13 +15,15 @@ import 'my_posts_page.dart';
 import 'subscription_page.dart';
 import 'user_manage_page.dart';
 import 'settings_page.dart';
-import 'composer_page.dart';
 import '../../data/history_store.dart';
 import '../../data/forum_groups.dart';
 import '../../data/local_prefs.dart';
 import '../../data/common_forums_store.dart';
+import '../../data/perf_log.dart';
 import '../widgets/post_content.dart';
 import '../widgets/thread_list_item.dart';
+import '../widgets/composer_panel.dart';
+import '../widgets/resizable_divider.dart';
 
 final _fontTagRe = RegExp(
   r'<font\s+color="([^"]+)">([\s\S]*?)<\/font>',
@@ -57,6 +64,12 @@ final class _HomePageState extends State<HomePage> {
   Object? _randomCoverError;
   int _randomCoverNonce = 0;
 
+  // Request generation tokens to ignore stale results when user taps refresh
+  // repeatedly. Prevents concurrent request races & heavy rebuild storms.
+  int _forumListReqGen = 0;
+  int _threadsReqGen = 0;
+  int _randomCoverReqGen = 0;
+
   final _historyStore = HistoryStore();
   final _commonForumsStore = CommonForumsStore();
 
@@ -70,10 +83,19 @@ final class _HomePageState extends State<HomePage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadForumList());
   WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowAnnouncementOnce());
     WidgetsBinding.instance.addPostFrameCallback((_) => _refreshRandomCover());
+
+    // Listen for refresh signal from sub-window composer.
+    final composer = context.read<ComposerController>();
+    composer.refreshSignal.addListener(_onRefreshSignal);
   }
 
   Future<void> _refreshRandomCover() async {
     if (_randomCoverLoading) return;
+
+  final perf = PerfLog.stage('home.randomCover');
+  perf.check('start');
+
+  final myGen = ++_randomCoverReqGen;
     setState(() {
       _randomCoverLoading = true;
       _randomCoverError = null;
@@ -81,15 +103,41 @@ final class _HomePageState extends State<HomePage> {
 
   try {
       final repo = context.read<AppState>().repo;
+      perf.check('request.start');
       final url = await repo.getRandomCoverUrl();
+      perf.check('request.end');
       if (!mounted) return;
+  if (myGen != _randomCoverReqGen) return;
       setState(() {
         _randomCoverUrl = url;
     _randomCoverNonce++;
         _randomCoverLoading = false;
       });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        perf.end('firstFrame');
+      });
+    } on HandshakeException catch (e) {
+      // Common on Windows with some networks/proxy/AV. Treat as optional.
+      if (!mounted) return;
+      if (myGen != _randomCoverReqGen) return;
+      perf.end('skip.handshake', {'err': e.toString()});
+      setState(() {
+        _randomCoverError = e;
+        _randomCoverLoading = false;
+      });
+    } on SocketException catch (e) {
+      if (!mounted) return;
+      if (myGen != _randomCoverReqGen) return;
+      perf.end('skip.socket', {'err': e.toString()});
+      setState(() {
+        _randomCoverError = e;
+        _randomCoverLoading = false;
+      });
     } catch (e) {
       if (!mounted) return;
+  if (myGen != _randomCoverReqGen) return;
+      perf.end('error', {'err': e.toString()});
       setState(() {
         _randomCoverError = e;
         _randomCoverLoading = false;
@@ -123,7 +171,15 @@ final class _HomePageState extends State<HomePage> {
     _scrollController
       ..removeListener(_onScroll)
       ..dispose();
+    final composer = context.read<ComposerController>();
+    composer.refreshSignal.removeListener(_onRefreshSignal);
     super.dispose();
+  }
+
+  void _onRefreshSignal() {
+    if (_selectedForumId != null) {
+      _loadPage(1, forceRefresh: true);
+    }
   }
 
   void _onScroll() {
@@ -135,28 +191,54 @@ final class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadForumList() async {
+  final myGen = ++_forumListReqGen;
+  final perf = PerfLog.stage('home.forumList');
+  perf.check('start');
     setState(() {
       _loading = true;
       _error = null;
     });
 
+  perf.check('setState.loading');
+
     final app = context.read<AppState>();
     try {
+  perf.check('request.forums.start');
       final list = await app.repo.getForumList();
+  perf.check('request.forums.end');
+
+  if (!mounted) return;
+  if (myGen != _forumListReqGen) return;
 
       // getForumList() 里 id<0 的时间线条目通常只有一个（例如 -1: "时间线"），
       // 真正的子时间线（综合线/创作线/...）需要从 getTimelineList() 单独获取。
       List<api.Timeline>? timelines = list.timelineList;
       try {
+  perf.check('request.timelines.start');
         timelines = await app.repo.getTimelineList();
+  perf.check('request.timelines.end');
       } catch (_) {
         // ignore; fallback to list.timelineList
+  perf.check('request.timelines.err');
       }
+
+  if (!mounted) return;
+  if (myGen != _forumListReqGen) return;
 
       final mergedList = api.ForumList(list.forumGroupList, list.forumList, timelines);
       setState(() {
         _forumList = mergedList;
         _loading = false;
+      });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        perf.end(
+          'firstFrame',
+          {
+            'forums': mergedList.forumList.length,
+            'timelines': mergedList.timelineList?.length,
+          },
+        );
       });
 
   // ignore: discarded_futures
@@ -167,6 +249,9 @@ final class _HomePageState extends State<HomePage> {
         await _selectForum(list.forumList.first);
       }
     } catch (e) {
+  if (!mounted) return;
+  if (myGen != _forumListReqGen) return;
+  perf.end('error', {'err': e.toString()});
       setState(() {
         _error = e;
         _loading = false;
@@ -338,17 +423,36 @@ final class _HomePageState extends State<HomePage> {
     final forumId = _selectedForumId;
     if (forumId == null) return;
 
+    final perf = PerfLog.stage('home.threadList');
+    perf.check(
+      'start',
+      fields: {
+        'forumId': forumId,
+        'page': page,
+        'force': forceRefresh,
+        'timeline': _selectedIsTimeline,
+      },
+    );
+
+  final myGen = ++_threadsReqGen;
+
     setState(() {
       _loadingPage = true;
     });
+    perf.check('setState.loading');
 
     try {
-    final items = _selectedIsTimeline
-      ? await app.repo
-        .getTimelinePage(forumId, page, forceRefresh: forceRefresh)
-      : await app.repo
-        .getForumPage(forumId, page, forceRefresh: forceRefresh);
-      setState(() {
+      perf.check('request.start');
+      final items = _selectedIsTimeline
+          ? await app.repo
+              .getTimelinePage(forumId, page, forceRefresh: forceRefresh)
+          : await app.repo
+              .getForumPage(forumId, page, forceRefresh: forceRefresh);
+      perf.check('request.end', fields: {'items': items.length});
+  if (!mounted) return;
+  if (myGen != _threadsReqGen) return;
+
+  setState(() {
         if (page == 1) {
           _threads
             ..clear()
@@ -360,8 +464,45 @@ final class _HomePageState extends State<HomePage> {
         _hasMore = items.isNotEmpty; // conservative
         _loadingPage = false;
       });
+
+      // ---- Adjacent page prefetch (best-effort) ----
+      // 策略与 ThreadPage 一致：保留最近 5 页窗口 + 预取下一页。
+      if (mounted) {
+        final keepMin = (page - 4).clamp(1, page);
+        final keepMax = page + 1;
+        if (_selectedIsTimeline) {
+          // ignore: discarded_futures
+          app.repo.prefetchTimelineAdjacentPages(
+            timelineId: forumId,
+            currentPage: page,
+            backward: 0,
+            forward: _hasMore ? 1 : 0,
+            keepMinPage: keepMin,
+            keepMaxPage: keepMax,
+          );
+        } else {
+          // ignore: discarded_futures
+          app.repo.prefetchForumAdjacentPages(
+            forumId: forumId,
+            currentPage: page,
+            backward: 0,
+            forward: _hasMore ? 1 : 0,
+            keepMinPage: keepMin,
+            keepMaxPage: keepMax,
+          );
+        }
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        perf.end('firstFrame', {'threads': _threads.length, 'hasMore': _hasMore});
+      });
     } catch (e) {
-      setState(() {
+  if (!mounted) return;
+  if (myGen != _threadsReqGen) return;
+
+      perf.end('error', {'err': e.toString()});
+
+  setState(() {
         _loadingPage = false;
       });
       if (mounted) {
@@ -384,7 +525,7 @@ final class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final app = context.watch<AppState>();
+    final settings = context.watch<SettingsController>();
 
   return Scaffold(
       appBar: AppBar(
@@ -408,7 +549,7 @@ final class _HomePageState extends State<HomePage> {
             tooltip: '用户',
             onPressed: () => setState(() => _sectionIndex = 5),
             icon: Icon(
-              context.watch<AppState>().hasCookie
+              context.watch<CookieController>().hasCookie
                   ? Icons.verified_user_outlined
                   : Icons.person_outline,
             ),
@@ -425,61 +566,115 @@ final class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      floatingActionButton: (_sectionIndex == 1 &&
-              _selectedForumId != null &&
-              _selectedIsTimeline == false)
-          ? FloatingActionButton.extended(
-              onPressed: () async {
-                final fid = _selectedForumId;
-                if (fid == null) return;
-                final ok = await showDialog<bool>(
-                  context: context,
-                  barrierDismissible: false,
-                  builder: (context) => ComposerPage.newThread(
-                    forumId: fid,
-                    forumName: _selectedForumName,
-                  ),
-                );
-                if (ok == true) {
-                  await _loadPage(1, forceRefresh: true);
-                  if (_scrollController.hasClients) {
-                    _scrollController.jumpTo(0);
-                  }
-                }
-              },
-              icon: const Icon(Icons.edit_outlined),
-              label: const Text('发串'),
-            )
-          : null,
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('加载失败：$_error'),
-                      const SizedBox(height: 12),
-                      FilledButton(
-                          onPressed: _loadForumList, child: const Text('重试')),
-                    ],
-                  ),
+      floatingActionButton: Builder(
+        builder: (context) {
+          final composer = context.watch<ComposerController>();
+          // Hide FAB whenever any composer is open (embedded panel or
+          // detached sub-window) to avoid duplicate editing areas.
+          if (composer.isOpen || composer.activeWindowId != null) {
+            // Best-effort alive check for detached windows that may have
+            // closed without sending the windowClosed message.
+            if (!composer.isOpen && composer.activeWindowId != null) {
+              // ignore: discarded_futures
+              composer.checkWindowAlive();
+            }
+            return const SizedBox.shrink();
+          }
+
+          return (_sectionIndex == 1 &&
+                  _selectedForumId != null &&
+                  _selectedIsTimeline == false)
+              ? FloatingActionButton.extended(
+                  onPressed: () {
+                    final fid = _selectedForumId;
+                    if (fid == null) return;
+                    final cookieCtrl = context.read<CookieController>();
+                    final composer = context.read<ComposerController>();
+                    composer.openPanel(
+                      ComposerArgs(
+                        mode: ComposerMode.newThread,
+                        forumId: fid,
+                        forumName: _selectedForumName,
+                      ),
+                      defaultCookieSlotId: cookieCtrl.defaultPostSlotId,
+                    );
+                  },
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('发串'),
                 )
-              : Row(
-                  children: [
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      width: _sidebarExpanded ? 300 : 72,
-                      child: _buildLeftSidebar(app),
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(child: _buildRightPane()),
-                  ],
-                ),
+              : const SizedBox.shrink();
+        },
+      ),
+      body: _buildBody(settings),
     );
   }
 
-  Widget _buildLeftSidebar(AppState app) {
+  Widget _buildBody(SettingsController settings) {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('加载失败：$_error'),
+            const SizedBox(height: 12),
+            FilledButton(onPressed: _loadForumList, child: const Text('重试')),
+          ],
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final composer = context.watch<ComposerController>();
+        final showPanel = composer.isOpen && composer.displayMode == ComposerDisplayMode.panel;
+        final maxPanelW = constraints.maxWidth * 0.55;
+
+        return Row(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: _sidebarExpanded ? 300 : 72,
+              child: _buildLeftSidebar(settings),
+            ),
+            const VerticalDivider(width: 1),
+            Expanded(child: _buildRightPane()),
+            if (showPanel)
+              ValueListenableBuilder<double>(
+                valueListenable: composer.panelWidthNotifier,
+                builder: (context, width, child) {
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ResizableDivider(
+                        width: width,
+                        minWidth: 320,
+                        maxWidth: maxPanelW,
+                        onWidthChanged: (w) => composer.setPanelWidth(w),
+                      ),
+                      SizedBox(
+                        width: width.clamp(320.0, maxPanelW),
+                        child: child!,
+                      ),
+                    ],
+                  );
+                },
+                child: ComposerPanel(
+                  onSubmitSuccess: () async {
+                    await _loadPage(1, forceRefresh: true);
+                    if (_scrollController.hasClients) {
+                      _scrollController.jumpTo(0);
+                    }
+                  },
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildLeftSidebar(SettingsController settings) {
     final list = _forumList;
     if (list == null) return const SizedBox.shrink();
 
@@ -490,9 +685,9 @@ final class _HomePageState extends State<HomePage> {
 
     final theme = Theme.of(context);
     final baseTextStyle = theme.textTheme.bodyMedium?.copyWith(
-          fontSize: app.contentFontSize,
-          height: app.contentLineHeight,
-          fontFamily: app.fontFamily,
+          fontSize: settings.contentFontSize,
+          height: settings.contentLineHeight,
+          fontFamily: settings.fontFamily,
         );
 
     return Material(
@@ -536,7 +731,7 @@ final class _HomePageState extends State<HomePage> {
                             child: Text(
                               'xdnmb',
                               style: theme.textTheme.titleMedium?.copyWith(
-                                fontFamily: app.fontFamily,
+                                fontFamily: settings.fontFamily,
                               ),
                             ),
                           ),
@@ -650,9 +845,9 @@ final class _HomePageState extends State<HomePage> {
                         child: Text(
                           '（暂未获取到子时间线）',
                           style: theme.textTheme.bodySmall?.copyWith(
-                            fontSize: (app.contentFontSize - 2).clamp(10, 999),
-                            height: app.contentLineHeight,
-                            fontFamily: app.fontFamily,
+                            fontSize: (settings.contentFontSize - 2).clamp(10, 999),
+                            height: settings.contentLineHeight,
+                            fontFamily: settings.fontFamily,
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
@@ -938,6 +1133,7 @@ final class _HomePageState extends State<HomePage> {
             cookie: p.userHash,
             time: p.postTime,
             isAdmin: p.isAdmin,
+            isSage: p.isSage,
             onTap: () {
               // Best-effort record visit at entry point.
               // ignore: discarded_futures
