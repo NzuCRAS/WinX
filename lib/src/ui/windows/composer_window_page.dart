@@ -11,6 +11,7 @@ import '../../app/app_state.dart';
 import '../../app/cookie_controller.dart';
 import '../../data/cookie_store.dart';
 import '../widgets/advanced_dice.dart';
+import '../widgets/composer_editor.dart';
 import 'composer_window_controller.dart';
 import 'image_viewer_window_helper.dart';
 
@@ -569,32 +570,17 @@ final class _EmoticonButton extends StatelessWidget {
                   itemCount: items.length,
                   itemBuilder: (_, index) {
                     final e = items[index];
-                    return InkWell(
-                      onTap: () {
+                    return EmoticonButton(
+                      name: e.name,
+                      text: e.text,
+                      fontSize: 13,
+                      onInsert: (text) {
                         Navigator.of(ctx).pop();
-                        controller.insertText(e.text);
+                        controller.insertText(text);
                         if (controller.focusNode.canRequestFocus) {
                           controller.focusNode.requestFocus();
                         }
                       },
-                      borderRadius: BorderRadius.circular(8),
-                      child: Container(
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                            color: cs.outlineVariant.withValues(alpha: 0.5),
-                          ),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          e.name,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: cs.onSurfaceVariant,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
                     );
                   },
                 ),

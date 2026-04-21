@@ -1,55 +1,53 @@
 # WinX
 
-WinX 是一个面向 Windows 桌面的 X 岛客户端（Flutter）。
+WinX 是一个面向 Windows 桌面的 X 岛客户端（Flutter）
 
-## 特性
+## 主要特点 (ゝ∀･)
 
-- 串列表/订阅/浏览历史/发言历史
-- 串内阅读进度记忆与精准跳转
-- 文本解析：引用 `>>No.xxx`、绿字（行首 `>`）、剧透 `[h]...[/h]`
-- 本地存储：SQLite（Windows 使用 `sqflite_common_ffi`）
+开发者致力于提高肥肥在大文本阅读与编辑时的流畅度和舒适度（希望借此能让鸽子版的鸽子多多更新( ╬ﾟ дﾟ )
 
-## 目录结构
+关于bug反馈和新增功能建议可以在集中串中提出，也可以直接提issue，有时间的话会加油修复的(`ε´ )
 
-- `lib/`：Flutter 客户端代码
-- `packages/xdnmb_api/`：内置的论坛 API package（作为独立 package 维护）
+## 功能实现 (*´ω`*)
 
-## 开发环境
+### 论坛浏览                                                                                                                                                                                                                                                                                                                
+  - [x] 版面列表浏览（支持折叠分组、常用置顶）                                                                                                                                                                                                                                                                             
+  - [x] 时间线浏览（综合线、创作线等子时间线）
+  - [x] 只看 PO 模式切换
+  - [x] 串内搜索（关键词匹配 + 上下导航）
+  - [x] 跳页功能（指定页码、串首、串尾）
+  - [x] 引用弹窗内容显示
 
-- Flutter stable
-- Dart SDK 与 `pubspec.yaml` 中的 `environment` 保持一致
+### 发帖与回复
 
-## 开始使用
+  - [x] 发串回串
+  - [x] 点击串内回复的编号以引用
+  - [x] 编辑器两种模式：嵌入式面板 / 独立窗口
+  - [x] 草稿自动保存与恢复
+  - [x] 颜文字
 
-```powershell
-flutter pub get
-flutter test
-flutter run -d windows
-```
+### 阅读进度管理
 
-构建 release：
+  - [x] 阅览游标和回复游标
+  - [x] 目标楼层闪烁高亮提示
 
-```powershell
-flutter build windows
-```
+### Cookie（饼干）管理
 
-## License
+  - [x] 多饼干槽位存储
+  - [x] 本地二维码导入饼干
+  - [x] 鉴权饼干和默认发言饼干管理
 
-MIT
-# xdnmb_client
+### 历史与订阅
 
-A new Flutter project.
+  - [x] 浏览历史（SQLite 持久化，按时间倒序）
+  - [x] 发串历史（记录发过的主题串）
+  - [x] 回串历史（记录发过的回复，支持跳转到回复位置）
+  - [x] 订阅串管理（订阅/取消订阅）
 
-## Getting Started
+### 设置与个性化
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+  - [x] 主题模式切换（亮色 / 暗色 / 跟随系统）
+  - [x] 内容字体大小调节
+  - [x] 行高调节
+  - [x] 字体族选择
+  - [x] 新版本检测与下载 

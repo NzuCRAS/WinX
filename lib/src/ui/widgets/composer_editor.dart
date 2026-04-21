@@ -337,7 +337,7 @@ final class _EmoticonDropdown extends StatelessWidget {
                   final scale =
                       (maxChars / e.name.length).clamp(0.72, 1.0);
                   final fontSize = baseFontSize * scale;
-                  return _EmoticonButton(
+                  return EmoticonButton(
                     name: e.name,
                     text: e.text,
                     fontSize: fontSize,
@@ -353,13 +353,14 @@ final class _EmoticonDropdown extends StatelessWidget {
   }
 }
 
-final class _EmoticonButton extends StatefulWidget {
+final class EmoticonButton extends StatefulWidget {
   final String name;
   final String text;
   final double fontSize;
   final void Function(String text) onInsert;
 
-  const _EmoticonButton({
+  const EmoticonButton({
+    super.key,
     required this.name,
     required this.text,
     required this.fontSize,
@@ -367,10 +368,10 @@ final class _EmoticonButton extends StatefulWidget {
   });
 
   @override
-  State<_EmoticonButton> createState() => _EmoticonButtonState();
+  State<EmoticonButton> createState() => EmoticonButtonState();
 }
 
-final class _EmoticonButtonState extends State<_EmoticonButton>
+final class EmoticonButtonState extends State<EmoticonButton>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl;
 
@@ -379,7 +380,9 @@ final class _EmoticonButtonState extends State<_EmoticonButton>
     super.initState();
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 400),
+      // Duration.zero: copy happens as soon as GestureDetector confirms long
+      // press (default ~500ms). Total ~0.5s.
+      duration: Duration.zero,
     )..addListener(() => setState(() {}));
   }
 
