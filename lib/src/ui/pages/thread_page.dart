@@ -17,6 +17,7 @@ import '../../data/thread_cursor.dart';
 import '../../data/perf_log.dart';
 import '../../data/xdnmb_repository.dart';
 import '../widgets/composer_panel.dart';
+import '../widgets/post_content.dart';
 import '../widgets/resizable_divider.dart';
 import '../widgets/thread_post_item.dart';
 
@@ -972,8 +973,14 @@ final class _ThreadPageState extends State<ThreadPage> {
     );
   }
 
-  void _onRefInThread(int postId) {
-    _scrollToPostId(postId, alignment: 0.15, flash: true);
+  /// Show a reference dialog for in-thread >>No.xxx taps.
+  /// This keeps the UX consistent with external references: a popup
+  /// rather than a scroll jump.
+  Future<void> _onRefInThread(int postId) async {
+    await showDialog(
+      context: context,
+      builder: (context) => ReferenceDialog(initialPostId: postId),
+    );
   }
 
   Future<void> _jumpToPage() async {

@@ -16,6 +16,10 @@ final class LocalPrefs {
   static const _kDownloadDirectory = 'xdnmb.downloadDirectory';
   static const _kThreadCacheTtlMinutes = 'xdnmb.threadCacheTtlMinutes';
 
+  // ---- Auto update ----
+  static const _kAutoCheckUpdate = 'xdnmb.autoCheckUpdate';
+  static const _kLastUpdateCheckAt = 'xdnmb.lastUpdateCheckAt';
+
   // ---- Network URL cache (best-effort) ----
   static const _kUrlCacheBase = 'xdnmb.urlCache.baseUrl';
   static const _kUrlCacheCdn = 'xdnmb.urlCache.cdnUrl';
@@ -300,5 +304,29 @@ final class LocalPrefs {
   Future<void> setThreadCacheTtlMinutes(int value) async {
     final sp = await _prefs;
     await sp.setInt(_kThreadCacheTtlMinutes, value);
+  }
+
+  // ---- Auto update ----
+
+  Future<bool> getAutoCheckUpdate() async {
+    final sp = await _prefs;
+    return sp.getBool(_kAutoCheckUpdate) ?? true;
+  }
+
+  Future<void> setAutoCheckUpdate(bool value) async {
+    final sp = await _prefs;
+    await sp.setBool(_kAutoCheckUpdate, value);
+  }
+
+  Future<DateTime?> getLastUpdateCheckAt() async {
+    final sp = await _prefs;
+    final ms = sp.getInt(_kLastUpdateCheckAt);
+    if (ms == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  Future<void> setLastUpdateCheckAt(DateTime value) async {
+    final sp = await _prefs;
+    await sp.setInt(_kLastUpdateCheckAt, value.millisecondsSinceEpoch);
   }
 }

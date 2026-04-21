@@ -48,7 +48,7 @@ final class _PostContentState extends State<PostContent> {
   // Advanced dice prefix: bold the digit before [n,m].
   static final _dicePrefix = RegExp(r'(\d+)\[(\d+),(\d+)\]');
 
-  static final _refDialogKey = GlobalKey<_ReferenceDialogState>();
+  static final _refDialogKey = GlobalKey<ReferenceDialogState>();
   static bool _refDialogOpen = false;
 
   /// Recognizers created during the last build. Disposed before the next build
@@ -193,7 +193,7 @@ final class _PostContentState extends State<PostContent> {
             try {
               await showDialog(
                 context: context,
-                builder: (context) => _ReferenceDialog(
+                builder: (context) => ReferenceDialog(
                   key: _refDialogKey,
                   initialPostId: id,
                 ),
@@ -396,16 +396,16 @@ String normalizeDialogHtml(String input) {
 
 String _stripTags(String s) => s.replaceAll(RegExp(r'<[^>]+>'), '');
 
-final class _ReferenceDialog extends StatefulWidget {
+final class ReferenceDialog extends StatefulWidget {
   final int initialPostId;
 
-  const _ReferenceDialog({super.key, required this.initialPostId});
+  const ReferenceDialog({super.key, required this.initialPostId});
 
   @override
-  State<_ReferenceDialog> createState() => _ReferenceDialogState();
+  State<ReferenceDialog> createState() => ReferenceDialogState();
 }
 
-final class _ReferenceDialogState extends State<_ReferenceDialog> {
+final class ReferenceDialogState extends State<ReferenceDialog> {
   final List<int> _stack = [];
   api.Reference? _ref;
   Object? _error;

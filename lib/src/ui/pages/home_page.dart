@@ -18,6 +18,7 @@ import 'settings_page.dart';
 import '../../data/history_store.dart';
 import '../../data/forum_groups.dart';
 import '../../data/local_prefs.dart';
+import '../../data/update_service.dart';
 import '../../data/common_forums_store.dart';
 import '../../data/perf_log.dart';
 import '../widgets/post_content.dart';
@@ -87,6 +88,44 @@ final class _HomePageState extends State<HomePage> {
     // Listen for refresh signal from sub-window composer.
     final composer = context.read<ComposerController>();
     composer.refreshSignal.addListener(_onRefreshSignal);
+
+    // Auto check update (Windows only, at most once per day).
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoCheckUpdate());
+  }
+
+  Future<void> _autoCheckUpdate() async {
+    if (!Platform.isWindows) return;
+    final settings = context.read<SettingsController>();
+    if (!settings.autoCheckUpdate) return;
+
+    final last = settings.lastUpdateCheckAt;
+    final now = DateTime.now();
+    if (last != null && now.difference(last) < const Duration(days: 1)) {
+      return;
+    }
+
+    final service = UpdateService();
+    final info = await service.checkForUpdate();
+    if (!mounted) return;
+
+    await settings.setLastUpdateCheckAt(now);
+
+    if (info != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('发现新版本 ${info.displayVersion}，请前往设置更新'),
+          action: SnackBarAction(
+            label: '前往',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsPage()),
+              );
+            },
+          ),
+          duration: const Duration(seconds: 10),
+        ),
+      );
+    }
   }
 
   Future<void> _refreshRandomCover() async {

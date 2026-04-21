@@ -21,6 +21,8 @@ final class SettingsController extends ChangeNotifier {
   int threadCacheTtlMinutes = LocalPrefs.defaultThreadCacheTtlMinutes;
   String? databaseDirectory;
   String? downloadDirectory;
+  bool autoCheckUpdate = true;
+  DateTime? lastUpdateCheckAt;
 
   /// Called whenever [enableDebugLog] changes. AppState wires this to repo.
   void Function(bool)? onDebugLogChanged;
@@ -42,6 +44,8 @@ final class SettingsController extends ChangeNotifier {
     threadCacheTtlMinutes = await _prefs.getThreadCacheTtlMinutes();
     databaseDirectory = await _prefs.getDatabaseDirectory();
     downloadDirectory = await _prefs.getDownloadDirectory();
+    autoCheckUpdate = await _prefs.getAutoCheckUpdate();
+    lastUpdateCheckAt = await _prefs.getLastUpdateCheckAt();
     final tm = await _prefs.getThemeMode();
     themeMode = switch (tm) {
       'light' => ThemeMode.light,
@@ -126,6 +130,18 @@ final class SettingsController extends ChangeNotifier {
   Future<void> setDownloadDirectory(String? value) async {
     downloadDirectory = value;
     await _prefs.setDownloadDirectory(value);
+    notifyListeners();
+  }
+
+  Future<void> setAutoCheckUpdate(bool value) async {
+    autoCheckUpdate = value;
+    await _prefs.setAutoCheckUpdate(value);
+    notifyListeners();
+  }
+
+  Future<void> setLastUpdateCheckAt(DateTime value) async {
+    lastUpdateCheckAt = value;
+    await _prefs.setLastUpdateCheckAt(value);
     notifyListeners();
   }
 
