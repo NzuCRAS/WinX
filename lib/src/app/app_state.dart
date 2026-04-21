@@ -176,7 +176,11 @@ final class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
-    composer.dispose();
+    try {
+      composer.dispose();
+    } catch (_) {
+      // ignore any late init errors (init may not have completed)
+    }
     try {
       repo.dispose();
     } catch (_) {}

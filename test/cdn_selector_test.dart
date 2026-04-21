@@ -35,14 +35,11 @@ final class _FakeHttpClient implements HttpClient {
 
   @override
   Future<HttpClientRequest> getUrl(Uri url) async {
-    final host = url.host;
-    if (failHosts.contains(host)) {
-      throw const HandshakeException('fake handshake');
-    }
-    final latency = latencyByHost[host] ?? Duration.zero;
-    // Simulate connect+handshake latency.
-    await Future<void>.delayed(latency);
-    return _FakeRequest();
+    return _FakeRequest(
+      host: url.host,
+      latencyByHost: latencyByHost,
+      failHosts: failHosts,
+    );
   }
 
   @override
@@ -54,11 +51,28 @@ final class _FakeHttpClient implements HttpClient {
 }
 
 final class _FakeRequest implements HttpClientRequest {
+  final String host;
+  final Map<String, Duration> latencyByHost;
+  final Set<String> failHosts;
+
+  _FakeRequest({
+    required this.host,
+    required this.latencyByHost,
+    required this.failHosts,
+  });
+
   @override
   final HttpHeaders headers = _FakeHeaders();
 
   @override
   Future<HttpClientResponse> close() async {
+    if (failHosts.contains(host)) {
+      throw const HandshakeException('fake handshake');
+    }
+    final latency = latencyByHost[host] ?? Duration.zero;
+    // Simulate response latency inside close() so _probeOnce's Stopwatch
+    // captures it.
+    await Future<void>.delayed(latency);
     return _FakeResponse();
   }
 
