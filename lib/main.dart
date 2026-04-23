@@ -140,13 +140,13 @@ final class _App extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
         visualDensity: VisualDensity.standard,
-        fontFamilyFallback: const [
-          'Segoe UI',
-          'Microsoft YaHei UI',
-          'Microsoft YaHei',
-          'Noto Sans CJK SC',
-          'Noto Sans',
-        ],
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.linux: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+          },
+        ),
         textTheme: ThemeData.light().textTheme.apply(
               bodyColor: Colors.black87,
               displayColor: Colors.black87,
@@ -159,13 +159,13 @@ final class _App extends StatelessWidget {
         ),
         useMaterial3: true,
         visualDensity: VisualDensity.standard,
-        fontFamilyFallback: const [
-          'Segoe UI',
-          'Microsoft YaHei UI',
-          'Microsoft YaHei',
-          'Noto Sans CJK SC',
-          'Noto Sans',
-        ],
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.linux: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+          },
+        ),
       ),
       home: const HomePage(),
     );

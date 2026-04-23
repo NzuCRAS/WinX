@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../app/cookie_controller.dart';
 import '../../data/qr_cookie.dart';
 import '../../data/qr_image_decoder.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
 
 final class QrImportPage extends StatefulWidget {
   const QrImportPage({super.key});
@@ -17,9 +18,11 @@ final class QrImportPage extends StatefulWidget {
 final class _QrImportPageState extends State<QrImportPage> {
   bool _importing = false;
   String? _last;
+  final _scrollController = ScrollController();
 
   @override
   void dispose() {
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -102,7 +105,9 @@ final class _QrImportPageState extends State<QrImportPage> {
       ),
       body: Stack(
         children: [
-          ListView(
+          SmoothListView(
+            duration: const Duration(milliseconds: 350),
+            controller: _scrollController,
             padding: const EdgeInsets.all(12),
             children: [
               const Text('Windows 桌面端不走摄像头扫码，改为选取本地二维码图片导入。'),

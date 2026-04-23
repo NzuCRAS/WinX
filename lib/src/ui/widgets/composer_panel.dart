@@ -231,7 +231,18 @@ final class ComposerPanel extends StatelessWidget {
 
       // Best-effort history recording
       // ignore: discarded_futures
-      _recordHistory(context, mainPostId, content: content, title: title);
+      _recordPostHistory(
+        app: app,
+        isReply: isReply,
+        forumId: forumId,
+        mainPostId: mainPostId,
+        content: content,
+        title: title,
+      );
+
+      // Give user time to read the toast before closing.
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!context.mounted) return null;
 
       await controller.clearDraft();
       controller.resetState();
@@ -247,68 +258,69 @@ final class ComposerPanel extends StatelessWidget {
     }
   }
 
-  Future<void> _recordHistory(
-    BuildContext context,
-    int? mainPostId, {
-    required String content,
-    required String? title,
-  }) async {
-    final controller = context.read<ComposerController>();
-    final app = context.read<AppState>();
+}
 
-    api.Thread? threadHead;
-    if (mainPostId != null) {
-      try {
-        threadHead =
-            await app.repo.getThreadPage(mainPostId, 1, forceRefresh: true);
-      } catch (_) {
-        // ignore: best-effort only
-      }
+/// Best-effort post history recording (shared between panel and dialog).
+Future<void> _recordPostHistory({
+  required AppState app,
+  required bool isReply,
+  required int? forumId,
+  required int? mainPostId,
+  required String content,
+  required String? title,
+}) async {
+  api.Thread? threadHead;
+  if (mainPostId != null) {
+    try {
+      threadHead =
+          await app.repo.getThreadPage(mainPostId, 1, forceRefresh: true);
+    } catch (_) {
+      // ignore: best-effort only
     }
-
-    int? replyPostId;
-    int? replyPage;
-    if (controller.isReply && mainPostId != null) {
-      try {
-        final rc = threadHead?.mainPost.replyCount ?? 0;
-        // xdnmb API returns 19 replies per page. The new reply is the
-        // (rc + 1)-th reply, so its page is (rc ~/ 19 + 1).
-        final lastPage = rc ~/ 19 + 1;
-        replyPage = lastPage;
-        final lastThread = await app.repo
-            .getThreadPage(mainPostId, lastPage, forceRefresh: true);
-        if (lastThread.replies.isNotEmpty) {
-          replyPostId = lastThread.replies
-              .reduce((a, b) => a.id > b.id ? a : b)
-              .id;
-        }
-      } catch (_) {
-        // ignore: best-effort only
-      }
-    }
-
-    final store = PostHistoryStore();
-    await store.record(
-      PostHistoryEntry(
-        isReply: controller.isReply,
-        forumId: controller.args?.forumId,
-        mainPostId: mainPostId,
-        replyPostId: replyPostId,
-        title: title,
-        content: content,
-        postedAt: DateTime.now(),
-        threadUserHash: threadHead?.mainPost.userHash.trim().isEmpty == true
-            ? null
-            : threadHead?.mainPost.userHash.trim(),
-        threadIsAdmin: threadHead?.mainPost.isAdmin,
-        threadPostTime: threadHead?.mainPost.postTime,
-        threadReplyCount: threadHead?.mainPost.replyCount,
-        threadThumbImageUrl: threadHead?.mainPost.thumbImageUrl,
-        threadContent: threadHead?.mainPost.content,
-        replyPage: replyPage,
-      ),
-    );
   }
+
+  int? replyPostId;
+  int? replyPage;
+  if (isReply && mainPostId != null) {
+    try {
+      final rc = threadHead?.mainPost.replyCount ?? 0;
+      // xdnmb API returns 19 replies per page. The new reply is the
+      // (rc + 1)-th reply, so its page is (rc ~/ 19 + 1).
+      final lastPage = rc ~/ 19 + 1;
+      replyPage = lastPage;
+      final lastThread = await app.repo
+          .getThreadPage(mainPostId, lastPage, forceRefresh: true);
+      if (lastThread.replies.isNotEmpty) {
+        replyPostId = lastThread.replies
+            .reduce((a, b) => a.id > b.id ? a : b)
+            .id;
+      }
+    } catch (_) {
+      // ignore: best-effort only
+    }
+  }
+
+  final store = PostHistoryStore();
+  await store.record(
+    PostHistoryEntry(
+      isReply: isReply,
+      forumId: forumId,
+      mainPostId: mainPostId,
+      replyPostId: replyPostId,
+      title: title,
+      content: content,
+      postedAt: DateTime.now(),
+      threadUserHash: threadHead?.mainPost.userHash.trim().isEmpty == true
+          ? null
+          : threadHead?.mainPost.userHash.trim(),
+      threadIsAdmin: threadHead?.mainPost.isAdmin,
+      threadPostTime: threadHead?.mainPost.postTime,
+      threadReplyCount: threadHead?.mainPost.replyCount,
+      threadThumbImageUrl: threadHead?.mainPost.thumbImageUrl,
+      threadContent: threadHead?.mainPost.content,
+      replyPage: replyPage,
+    ),
+  );
 }
 
 /// Compact image preview shown inside the panel.
@@ -598,6 +610,21 @@ final class _ComposerDialogContentState extends State<_ComposerDialogContent> {
       if (!context.mounted) return null;
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('发送成功')));
+
+      // Best-effort history recording
+      // ignore: discarded_futures
+      _recordPostHistory(
+        app: app,
+        isReply: isReply,
+        forumId: forumId,
+        mainPostId: mainPostId,
+        content: content,
+        title: title,
+      );
+
+      // Give user time to read the toast before closing.
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!context.mounted) return null;
 
       await controller.clearDraft();
       controller.resetState();

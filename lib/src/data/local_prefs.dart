@@ -8,9 +8,11 @@ final class LocalPrefs {
   static const _kThemeMode = 'xdnmb.themeMode';
   static const _kPreviewMaxLines = 'xdnmb.previewMaxLines';
   static const _kFontFamily = 'xdnmb.fontFamily';
+  static const _kFontConfig = 'xdnmb.fontConfig.v2';
   static const _kAutoLoadOnScroll = 'xdnmb.autoLoadOnScroll';
   static const _kShowImageInThread = 'xdnmb.showImageInThread';
   static const _kThreadPreloadDistance = 'xdnmb.threadPreloadDistance';
+  static const _kShowLineBreakIndicator = 'xdnmb.showLineBreakIndicator';
   static const _kEnableDebugLog = 'xdnmb.enableDebugLog';
   static const _kDatabaseDirectory = 'xdnmb.databaseDirectory';
   static const _kDownloadDirectory = 'xdnmb.downloadDirectory';
@@ -35,6 +37,7 @@ final class LocalPrefs {
   static const bool defaultAutoLoadOnScroll = true;
   static const bool defaultShowImageInThread = true;
   static const double defaultThreadPreloadDistance = 240.0;
+  static const bool defaultShowLineBreakIndicator = true;
   static const bool defaultEnableDebugLog = false;
   static const int defaultThreadCacheTtlMinutes = 5;
 
@@ -103,6 +106,18 @@ final class LocalPrefs {
     await sp.setString(_kFontFamily, value);
   }
 
+  // ---- Font Config v2 ----
+
+  Future<String> getFontConfigJson() async {
+    final sp = await _prefs;
+    return sp.getString(_kFontConfig) ?? '';
+  }
+
+  Future<void> setFontConfigJson(String value) async {
+    final sp = await _prefs;
+    await sp.setString(_kFontConfig, value);
+  }
+
   Future<bool> getAutoLoadOnScroll() async {
     final sp = await _prefs;
     return sp.getBool(_kAutoLoadOnScroll) ?? defaultAutoLoadOnScroll;
@@ -141,6 +156,16 @@ final class LocalPrefs {
   Future<void> setEnableDebugLog(bool value) async {
     final sp = await _prefs;
     await sp.setBool(_kEnableDebugLog, value);
+  }
+
+  Future<bool> getShowLineBreakIndicator() async {
+    final sp = await _prefs;
+    return sp.getBool(_kShowLineBreakIndicator) ?? defaultShowLineBreakIndicator;
+  }
+
+  Future<void> setShowLineBreakIndicator(bool value) async {
+    final sp = await _prefs;
+    await sp.setBool(_kShowLineBreakIndicator, value);
   }
 
   /// Per-thread scroll offset storing.

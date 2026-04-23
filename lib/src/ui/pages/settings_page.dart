@@ -7,6 +7,8 @@ import 'package:provider/provider.dart';
 import '../../app/settings_controller.dart';
 import '../../data/app_version.dart';
 import '../../data/update_service.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
+import 'font_settings_page.dart';
 
 final class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -18,6 +20,13 @@ final class SettingsPage extends StatefulWidget {
 final class _SettingsPageState extends State<SettingsPage> {
   final _updateService = UpdateService();
   UpdateInfo? _pendingUpdate;
+  final _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -26,7 +35,9 @@ final class _SettingsPageState extends State<SettingsPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('全局设置')),
-      body: ListView(
+      body: SmoothListView(
+        duration: const Duration(milliseconds: 350),
+        controller: _scrollController,
         padding: const EdgeInsets.all(16),
         children: [
           // ── Theme ──
@@ -74,7 +85,9 @@ final class _SettingsPageState extends State<SettingsPage> {
               style: TextStyle(
                 fontSize: settings.contentFontSize,
                 height: settings.contentLineHeight,
-                fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
+                fontWeight: settings.contentFontWeight,
+                fontFamily: settings.contentFontFamily,
+                fontFamilyFallback: settings.fontFamilyFallback,
               ),
             ),
           ),
@@ -83,28 +96,40 @@ final class _SettingsPageState extends State<SettingsPage> {
           // ── Font family ──
           Text('字体', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 8),
-          DropdownButtonFormField<String>(
-            value: settings.fontFamily,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-              contentPadding:
-                  EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            ),
-            items: const [
-              DropdownMenuItem(value: '', child: Text('系统默认')),
-              DropdownMenuItem(
-                  value: 'Noto Sans SC', child: Text('Noto Sans SC')),
-              DropdownMenuItem(
-                  value: 'Noto Serif SC', child: Text('Noto Serif SC')),
-              DropdownMenuItem(value: 'Microsoft YaHei', child: Text('微软雅黑')),
-              DropdownMenuItem(value: 'SimSun', child: Text('宋体')),
-              DropdownMenuItem(value: 'KaiTi', child: Text('楷体')),
-              DropdownMenuItem(value: 'FangSong', child: Text('仿宋')),
-              DropdownMenuItem(value: 'SimHei', child: Text('黑体')),
-            ],
-            onChanged: (v) {
-              if (v != null) settings.setFontFamily(v);
+          InkWell(
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const FontSettingsPage(),
+                ),
+              );
             },
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                border: Border.all(color: cs.outlineVariant),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      settings.contentFont.fallbackOrder.isEmpty
+                          ? '系统默认'
+                          : settings.contentFont.fallbackOrder.join(' > '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: settings.contentFontFamily,
+                        fontFamilyFallback: settings.contentFontFallback,
+                      ),
+                    ),
+                  ),
+                  Icon(Icons.chevron_right, color: cs.onSurfaceVariant),
+                ],
+              ),
+            ),
           ),
           const SizedBox(height: 24),
 
@@ -155,6 +180,13 @@ final class _SettingsPageState extends State<SettingsPage> {
             subtitle: const Text('关闭后串内不自动加载缩略图'),
             value: settings.showImageInThread,
             onChanged: (v) => settings.setShowImageInThread(v),
+          ),
+
+          SwitchListTile(
+            title: const Text('显示换行标记'),
+            subtitle: const Text('在内容中的主动换行处显示 ↩ 符号'),
+            value: settings.showLineBreakIndicator,
+            onChanged: (v) => settings.setShowLineBreakIndicator(v),
           ),
 
           const SizedBox(height: 12),

@@ -19,6 +19,7 @@ final class ThreadListItem extends StatelessWidget {
   final DateTime time;
   final bool isAdmin;
   final bool isSage;
+  final int? replyCount;
   final VoidCallback? onTap;
   final VoidCallback? onSecondaryTap;
 
@@ -30,7 +31,8 @@ final class ThreadListItem extends StatelessWidget {
     required this.cookie,
     required this.time,
     this.isAdmin = false,
-  this.isSage = false,
+    this.isSage = false,
+    this.replyCount,
     this.onTap,
     this.onSecondaryTap,
   });
@@ -79,7 +81,17 @@ final class ThreadListItem extends StatelessWidget {
           color: cs.onSurfaceVariant,
           fontSize: (settings.contentFontSize - 2).clamp(10, 999),
           height: settings.contentLineHeight,
-          fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
+          fontWeight: settings.contentFontWeight,
+          fontFamily: settings.contentFontFamily,
+          fontFamilyFallback: settings.contentFontFallback,
+        );
+    final uiBase = Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: cs.onSurfaceVariant,
+          fontSize: (settings.contentFontSize - 2).clamp(10, 999),
+          height: settings.contentLineHeight,
+          fontWeight: settings.uiFontWeight,
+          fontFamily: settings.uiFontFamily,
+          fontFamilyFallback: settings.uiFontFallback,
         );
 
     final tile = ListTile(
@@ -121,8 +133,9 @@ final class ThreadListItem extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
+                fontWeight: settings.contentFontWeight,
+                fontFamily: settings.contentFontFamily,
+                fontFamilyFallback: settings.contentFontFallback,
               ),
             ),
           PreviewRichText(
@@ -131,7 +144,9 @@ final class ThreadListItem extends StatelessWidget {
             style: TextStyle(
               fontSize: settings.contentFontSize,
               height: settings.contentLineHeight,
-              fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
+              fontWeight: settings.contentFontWeight,
+              fontFamily: settings.contentFontFamily,
+              fontFamilyFallback: settings.contentFontFallback,
             ),
           ),
           const SizedBox(height: 4),
@@ -142,18 +157,18 @@ final class ThreadListItem extends StatelessWidget {
                 if (isSage) ...[
                   TextSpan(
                     text: 'SAGE ↓  ',
-                    style: base?.copyWith(
+                    style: uiBase?.copyWith(
                       color: cs.error,
                       fontWeight: FontWeight.w800,
                       fontSize:
-                          ((base.fontSize ?? 12) * 1.25).clamp(10, 999),
+                          ((uiBase.fontSize ?? 12) * 1.25).clamp(10, 999),
                     ),
                   ),
                 ],
                 if (isReplyLabel && cookieText.startsWith('回串')) ...[
                   TextSpan(
                     text: '回串',
-                    style: base?.copyWith(
+                    style: uiBase?.copyWith(
                       color: cs.error,
                       fontWeight: FontWeight.w700,
                     ),
@@ -178,6 +193,21 @@ final class ThreadListItem extends StatelessWidget {
                   text: _formatToSeconds(time),
                   style: base?.copyWith(color: cs.onSurfaceVariant),
                 ),
+                if (replyCount != null) ...[
+                  const TextSpan(text: '  '),
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: Icon(
+                      Icons.mode_comment,
+                      size: (base?.fontSize ?? 12),
+                      color: cs.primary,
+                    ),
+                  ),
+                  TextSpan(
+                    text: ' $replyCount',
+                    style: base?.copyWith(color: cs.primary),
+                  ),
+                ],
               ],
             ),
             maxLines: 1,

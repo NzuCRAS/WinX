@@ -11,6 +11,7 @@ import '../../app/composer_controller.dart';
 import '../../app/cookie_controller.dart';
 import '../../data/cookie_store.dart';
 import 'advanced_dice.dart';
+import 'smooth_scroll.dart';
 
 /// The core composer form: cookie selector, title, content editor,
 /// image upload, watermark, emoticons.
@@ -57,7 +58,7 @@ final class ComposerEditor extends StatelessWidget {
 
     return FocusTraversalGroup(
       policy: OrderedTraversalPolicy(),
-      child: SingleChildScrollView(
+      child: SmoothSingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -71,6 +72,7 @@ final class ComposerEditor extends StatelessWidget {
                 Expanded(
                   child: DropdownButtonFormField<String>(
                     isExpanded: true,
+                    menuMaxHeight: 300,
                     value: controller.selectedCookieSlotId,
                     items: slotItems
                         .map(
@@ -371,71 +373,28 @@ final class EmoticonButton extends StatefulWidget {
   State<EmoticonButton> createState() => EmoticonButtonState();
 }
 
-final class EmoticonButtonState extends State<EmoticonButton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      // Duration.zero: copy happens as soon as GestureDetector confirms long
-      // press (default ~500ms). Total ~0.5s.
-      duration: Duration.zero,
-    )..addListener(() => setState(() {}));
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  void _onLongPressStart(LongPressStartDetails _) {
-    _ctrl.forward(from: 0);
-  }
-
-  void _onLongPressEnd(LongPressEndDetails _) {
-    if (_ctrl.isCompleted) {
-      Clipboard.setData(ClipboardData(text: widget.text));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('已复制: ${widget.name}'),
-            duration: const Duration(milliseconds: 800),
-          ),
-        );
-      }
+final class EmoticonButtonState extends State<EmoticonButton> {
+  void _onSecondaryTap() {
+    Clipboard.setData(ClipboardData(text: widget.text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已复制: ${widget.name}'),
+          duration: const Duration(milliseconds: 800),
+        ),
+      );
     }
-    _ctrl.reset();
-  }
-
-  void _onLongPressCancel() {
-    _ctrl.reset();
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final progress = _ctrl.value;
 
     return GestureDetector(
       onTap: () => widget.onInsert(widget.text),
-      onLongPressStart: _onLongPressStart,
-      onLongPressEnd: _onLongPressEnd,
-      onLongPressCancel: _onLongPressCancel,
+      onSecondaryTap: _onSecondaryTap,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-            stops: [progress, progress],
-            colors: [
-              cs.outlineVariant.withValues(alpha: 0.35),
-              Colors.transparent,
-            ],
-          ),
           border: Border.all(color: cs.outline.withValues(alpha: 0.5)),
           borderRadius: BorderRadius.circular(20),
         ),
@@ -448,7 +407,6 @@ final class EmoticonButtonState extends State<EmoticonButton>
               overflow: TextOverflow.visible,
               maxLines: 1,
               style: TextStyle(
-                fontFamily: 'Microsoft YaHei',
                 fontSize: widget.fontSize,
                 color: cs.primary,
               ),

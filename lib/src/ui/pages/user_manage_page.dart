@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../app/cookie_controller.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
 import 'qr_import_page.dart';
 
 final class UserManagePage extends StatefulWidget {
@@ -12,6 +13,8 @@ final class UserManagePage extends StatefulWidget {
 }
 
 final class _UserManagePageState extends State<UserManagePage> {
+  final _scrollController = ScrollController();
+
   Future<void> _editCookieSlot(BuildContext context, String slotId) async {
     final cookie = context.read<CookieController>();
     final slot = cookie.slots.firstWhere((s) => s.id == slotId);
@@ -61,7 +64,9 @@ final class _UserManagePageState extends State<UserManagePage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('用户管理')),
-      body: ListView(
+      body: SmoothListView(
+        duration: const Duration(milliseconds: 350),
+        controller: _scrollController,
         padding: const EdgeInsets.all(12),
         children: [
           Card(
@@ -218,5 +223,11 @@ final class _UserManagePageState extends State<UserManagePage> {
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 }

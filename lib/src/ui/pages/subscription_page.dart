@@ -4,6 +4,7 @@ import 'package:xdnmb_api/xdnmb_api.dart' as api;
 
 import '../../app/app_state.dart';
 import '../../data/subscription_store.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
 import '../widgets/thread_list_item.dart';
 import 'thread_page.dart';
 
@@ -16,9 +17,6 @@ final class SubscriptionPage extends StatefulWidget {
 
 final class _SubscriptionPageState extends State<SubscriptionPage> {
   final _store = const SubscriptionStore();
-
-  // Doc: JSON /feed returns at most 10 items per page.
-  static const int _pageSize = 10;
 
   final _feedIdCtrl = TextEditingController();
   String? _loadedFeedId;
@@ -106,7 +104,7 @@ final class _SubscriptionPageState extends State<SubscriptionPage> {
       setState(() {
         _items = unique;
         _loading = false;
-        _hasMore = data.length >= _pageSize;
+        _hasMore = data.isNotEmpty;
       });
     } catch (e) {
       if (!mounted) return;
@@ -138,7 +136,7 @@ final class _SubscriptionPageState extends State<SubscriptionPage> {
       setState(() {
         _page = nextPage;
         _items = [..._items, ...unique];
-        _hasMore = data.length >= _pageSize;
+        _hasMore = data.isNotEmpty;
         _loadingMore = false;
       });
     } catch (e) {
@@ -236,7 +234,8 @@ final class _SubscriptionPageState extends State<SubscriptionPage> {
             child: RefreshIndicator(
               onRefresh: _refresh,
               child: _error != null
-                  ? ListView(
+                  ? SmoothListView(
+                      duration: const Duration(milliseconds: 350),
                       controller: _scrollController,
                       physics: const AlwaysScrollableScrollPhysics(),
                       children: [
@@ -258,7 +257,8 @@ final class _SubscriptionPageState extends State<SubscriptionPage> {
                         ),
                       ],
                     )
-          : ListView.separated(
+          : SmoothListView.separated(
+            duration: const Duration(milliseconds: 350),
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(),
                         itemCount: _items.length + 1,

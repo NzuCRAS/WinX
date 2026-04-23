@@ -10,6 +10,7 @@ import 'package:xdnmb_api/xdnmb_api.dart' as api;
 import '../../app/app_state.dart';
 import '../../app/cookie_controller.dart';
 import '../../data/cookie_store.dart';
+import '../../data/post_history_store.dart';
 import '../widgets/advanced_dice.dart';
 import '../widgets/composer_editor.dart';
 import 'composer_window_controller.dart';
@@ -400,6 +401,66 @@ final class _StatusBar extends StatelessWidget {
 
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('发送成功')));
+
+      // Best-effort: resolve thread head for history recording.
+      api.Thread? threadHead;
+      if (mainPostId != null) {
+        try {
+          threadHead =
+              await app.repo.getThreadPage(mainPostId, 1, forceRefresh: true);
+        } catch (_) {
+          // ignore: best-effort only
+        }
+      }
+
+      // Best-effort: resolve newly created reply post id and page.
+      int? replyPostId;
+      int? replyPage;
+      if (isReply && mainPostId != null) {
+        try {
+          final rc = threadHead?.mainPost.replyCount ?? 0;
+          final lastPage = rc ~/ 19 + 1;
+          replyPage = lastPage;
+          final lastThread = await app.repo
+              .getThreadPage(mainPostId, lastPage, forceRefresh: true);
+          if (lastThread.replies.isNotEmpty) {
+            replyPostId = lastThread.replies
+                .reduce((a, b) => a.id > b.id ? a : b)
+                .id;
+          }
+        } catch (_) {
+          // ignore: best-effort only
+        }
+      }
+
+      // Record post history (successful submit only).
+      try {
+        final store = PostHistoryStore();
+        await store.record(
+          PostHistoryEntry(
+            isReply: isReply,
+            forumId: forumId,
+            mainPostId: mainPostId,
+            replyPostId: replyPostId,
+            title: title,
+            content: content,
+            postedAt: DateTime.now(),
+            threadUserHash:
+                threadHead?.mainPost.userHash.trim().isEmpty == true
+                    ? null
+                    : threadHead?.mainPost.userHash.trim(),
+            threadIsAdmin: threadHead?.mainPost.isAdmin,
+            threadPostTime: threadHead?.mainPost.postTime,
+            threadReplyCount: threadHead?.mainPost.replyCount,
+            threadThumbImageUrl: threadHead?.mainPost.thumbImageUrl,
+            threadContent: threadHead?.mainPost.content,
+            replyPage: replyPage,
+          ),
+        );
+      } catch (_) {
+        // ignore: best-effort only
+      }
+
       await controller.clearDraft();
 
       // Notify main window to refresh.
@@ -409,6 +470,9 @@ final class _StatusBar extends StatelessWidget {
       } catch (_) {
         // ignore: best-effort only
       }
+
+      // Give user time to read the toast before closing.
+      await Future.delayed(const Duration(milliseconds: 800));
 
       await windowManager.close();
     } catch (e) {

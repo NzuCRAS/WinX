@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../data/history_store.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
 import '../widgets/thread_list_item.dart';
 import 'thread_page.dart';
 
@@ -14,6 +15,7 @@ final class HistoryPage extends StatefulWidget {
 final class _HistoryPageState extends State<HistoryPage> {
   final _store = HistoryStore();
   late Future<List<HistoryEntry>> _future;
+  final _scrollController = ScrollController();
 
   Future<void> _confirmRemove(HistoryEntry e) async {
     final title = (e.title == null || e.title!.trim().isEmpty)
@@ -53,6 +55,12 @@ final class _HistoryPageState extends State<HistoryPage> {
   }
 
   @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -86,7 +94,9 @@ final class _HistoryPageState extends State<HistoryPage> {
           if (items.isEmpty) {
             return const Center(child: Text('（空）'));
           }
-          return ListView.separated(
+          return SmoothListView.separated(
+            duration: const Duration(milliseconds: 350),
+            controller: _scrollController,
             itemCount: items.length,
             separatorBuilder: (context, index) => const Divider(height: 1),
             itemBuilder: (context, index) {

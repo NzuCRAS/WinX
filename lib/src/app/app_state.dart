@@ -1,12 +1,15 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/io_client.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:xdnmb_api/xdnmb_api.dart';
 
 import '../data/cookie_store.dart';
 import '../data/cdn_selector.dart';
 import '../data/local_prefs.dart';
+import '../data/user_font_loader.dart';
 import '../data/xdnmb_repository.dart';
 import '../ui/app_navigator.dart';
 import '../data/perf_log.dart';
@@ -81,6 +84,16 @@ final class AppState extends ChangeNotifier {
         repo.setThreadCacheTtl(Duration(minutes: v));
     await settings.init();
 
+    // Load default and user-uploaded fonts into Flutter's font system.
+    await _loadDefaultFonts();
+    final allUserPaths = <String>{
+      ...settings.contentFont.userFontPaths,
+      ...settings.uiFont.userFontPaths,
+    };
+    if (allUserPaths.isNotEmpty) {
+      await UserFontLoader().loadAll(allUserPaths.toList());
+    }
+
     composer = ComposerController();
     repo.enableDebugLog = settings.enableDebugLog;
     repo.setThreadCacheTtl(Duration(minutes: settings.threadCacheTtlMinutes));
@@ -151,6 +164,39 @@ final class AppState extends ChangeNotifier {
     PerfLog.time('app.cdnSelector.start', () async {
       await cdnSelector.start();
     });
+  }
+
+  Future<void> _loadDefaultFonts() async {
+    try {
+      final docsDir = await getApplicationDocumentsDirectory();
+      final fontsDir = Directory('${docsDir.path}/xdnmb_client/fonts');
+      if (!await fontsDir.exists()) return;
+
+      final files = await fontsDir
+          .list()
+          .where((e) =>
+              e is File &&
+              e.path.toLowerCase().endsWith('.ttf') ||
+              e.path.toLowerCase().endsWith('.otf'))
+          .cast<File>()
+          .toList();
+
+      for (final file in files) {
+        try {
+          final bytes = await file.readAsBytes();
+          final familyName = file.path.split('/').last
+              .replaceAll(RegExp(r'\.(ttf|otf)$', caseSensitive: false), '');
+          final loader = FontLoader(familyName);
+          loader.addFont(Future.value(ByteData.view(bytes.buffer)));
+          await loader.load();
+          PerfLog.log('app.font.load ok family=$familyName');
+        } catch (e) {
+          PerfLog.log('app.font.load err file=${file.path} err=$e');
+        }
+      }
+    } catch (e) {
+      PerfLog.log('app.font.load.defaults err=$e');
+    }
   }
 
   Future<void> _warmUpNetwork() async {

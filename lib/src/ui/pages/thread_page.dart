@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:xdnmb_api/xdnmb_api.dart' as api;
@@ -16,10 +17,16 @@ import '../../data/subscription_store.dart';
 import '../../data/thread_cursor.dart';
 import '../../data/perf_log.dart';
 import '../../data/xdnmb_repository.dart';
+import '../widgets/animated_list_item.dart';
 import '../widgets/composer_panel.dart';
 import '../widgets/post_content.dart';
 import '../widgets/resizable_divider.dart';
+import '../widgets/smooth_scroll.dart';
 import '../widgets/thread_post_item.dart';
+
+final class BackIntent extends Intent {
+  const BackIntent();
+}
 
 enum _LoadDirection { refresh, append, prepend }
 
@@ -71,6 +78,8 @@ final class _ThreadPageState extends State<ThreadPage> {
   bool _hasMore = true;
   final ItemScrollController _itemScroll = ItemScrollController();
   final ItemPositionsListener _itemPositions = ItemPositionsListener.create();
+  final ScrollOffsetController _scrollOffsetController =
+      ScrollOffsetController();
 
   // True while [_loadSurroundingPages] is running. Used to defer
   // jump-failure handling until all surrounding pages are loaded.
@@ -977,10 +986,7 @@ final class _ThreadPageState extends State<ThreadPage> {
   /// This keeps the UX consistent with external references: a popup
   /// rather than a scroll jump.
   Future<void> _onRefInThread(int postId) async {
-    await showDialog(
-      context: context,
-      builder: (context) => ReferenceDialog(initialPostId: postId),
-    );
+    await showReferenceDialog(context, postId);
   }
 
   Future<void> _jumpToPage() async {
@@ -1008,8 +1014,11 @@ final class _ThreadPageState extends State<ThreadPage> {
                     controller: controller,
                     keyboardType: TextInputType.number,
                     textAlign: TextAlign.center,
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       hintText: '页码',
+                      helperText: _maxPageHint != null
+                          ? '第 $_page 页 / 共 $_maxPageHint 页'
+                          : '第 $_page 页',
                     ),
                   ),
                 ),
@@ -1056,7 +1065,12 @@ final class _ThreadPageState extends State<ThreadPage> {
               if (_posts.isEmpty) return;
               final lastPostIndex = _posts.length - 1;
               final lastItemIndex = _itemIndexForPostIndex(lastPostIndex);
-              _itemScroll.jumpTo(index: lastItemIndex, alignment: 1);
+              _itemScroll.scrollTo(
+                index: lastItemIndex,
+                alignment: 1,
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeOutCubic,
+              );
             });
           } else {
             // If maxPage is not available, load the current page and scroll to bottom
@@ -1067,7 +1081,12 @@ final class _ThreadPageState extends State<ThreadPage> {
               if (_posts.isEmpty) return;
               final lastPostIndex = _posts.length - 1;
               final lastItemIndex = _itemIndexForPostIndex(lastPostIndex);
-              _itemScroll.jumpTo(index: lastItemIndex, alignment: 1);
+              _itemScroll.scrollTo(
+                index: lastItemIndex,
+                alignment: 1,
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeOutCubic,
+              );
             });
           }
         } else {
@@ -1093,7 +1112,12 @@ final class _ThreadPageState extends State<ThreadPage> {
           // Scroll to mainPost (index 0 in _posts → item index accounts for
           // the optional top loader).
           final mainPostItemIndex = _itemIndexForPostIndex(0);
-          _itemScroll.jumpTo(index: mainPostItemIndex, alignment: 0);
+          _itemScroll.scrollTo(
+            index: mainPostItemIndex,
+            alignment: 0,
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOutCubic,
+          );
         });
         // Proactively load surrounding pages for a seamless scroll experience.
         // ignore: discarded_futures
@@ -1172,7 +1196,23 @@ final class _ThreadPageState extends State<ThreadPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return Shortcuts(
+      shortcuts: {
+        const SingleActivator(LogicalKeyboardKey.escape):
+            const BackIntent(),
+      },
+      child: Actions(
+        actions: {
+          BackIntent: CallbackAction<BackIntent>(
+            onInvoke: (_) {
+              Navigator.of(context).pop();
+              return null;
+            },
+          ),
+        },
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
       appBar: _searchMode
           ? AppBar(
               title: TextField(
@@ -1231,7 +1271,12 @@ final class _ThreadPageState extends State<ThreadPage> {
                         direction: _LoadDirection.refresh,
                         forceRefresh: true);
                     if (_itemScroll.isAttached) {
-                      _itemScroll.jumpTo(index: 0, alignment: 0);
+                      _itemScroll.scrollTo(
+                        index: 0,
+                        alignment: 0,
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeOut,
+                      );
                     }
                   },
                   icon: const Icon(Icons.refresh_outlined),
@@ -1266,8 +1311,7 @@ final class _ThreadPageState extends State<ThreadPage> {
                         },
                   icon: const Icon(Icons.bookmark_add_outlined),
                 ),
-                IconButton(
-                  tooltip: '只看PO',
+                TextButton(
                   onPressed: () async {
                     final oldOnlyPo = _onlyPo;
                     setState(() {
@@ -1278,19 +1322,37 @@ final class _ThreadPageState extends State<ThreadPage> {
                         direction: _LoadDirection.refresh, forceRefresh: true);
                     _repoRef?.startThreadSession(widget.mainPostId, _onlyPo);
                     if (_itemScroll.isAttached) {
-                      _itemScroll.jumpTo(index: 0, alignment: 0);
+                      _itemScroll.scrollTo(
+                        index: 0,
+                        alignment: 0,
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeOut,
+                      );
                     }
                   },
-                  icon: Icon(
-                    Icons.person_search_outlined,
-                    color:
-                        _onlyPo ? Theme.of(context).colorScheme.primary : null,
+                  style: TextButton.styleFrom(
+                    foregroundColor: _onlyPo
+                        ? Theme.of(context).colorScheme.primary
+                        : Theme.of(context).colorScheme.onSurface,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(
+                    'PO',
+                    style: TextStyle(
+                      fontWeight: _onlyPo ? FontWeight.w700 : FontWeight.w500,
+                    ),
                   ),
                 ),
-                IconButton(
-                  tooltip: '跳页',
+                TextButton(
                   onPressed: _jumpToPage,
-                  icon: const Icon(Icons.menu_book_outlined),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('>>'),
                 ),
               ],
             ),
@@ -1400,38 +1462,48 @@ final class _ThreadPageState extends State<ThreadPage> {
                                       }
                                       return false;
                                     },
-                                    child: ScrollablePositionedList.separated(
-                                      itemScrollController: _itemScroll,
-                                      itemPositionsListener: _itemPositions,
-                                      itemCount: _posts.length +
-                                          1 +
-                                          (_showTopLoader ? 1 : 0),
-                                      separatorBuilder: (context, index) =>
-                                          const Divider(height: 1),
-                                      itemBuilder: (context, index) {
-                                        // Top loader inserted before mainPost.
-                                        if (_showTopLoader && index == 0) {
-                                          return _buildTopLoader(context);
-                                        }
-                                        final adjustedIndex =
-                                            _showTopLoader ? index - 1 : index;
-                                        if (adjustedIndex == _posts.length) {
-                                          return _buildListFooter(context);
-                                        }
-                                        final p = _posts[adjustedIndex];
-                                        return ThreadPostItem(
-                                          post: p,
-                                          index: adjustedIndex,
-                                          poUserHash: _poUserHash,
-                                          flashPostId: _flashingPostId,
-                                          flashPhase: _flashPhase,
-                                          onReply: () => _replyToPost(p.id),
-                                          isSearchMatch:
-                                              _searchMatches.contains(adjustedIndex),
-                                          inThreadPostIds: _inThreadPostIds,
-                                          onRefInThread: _onRefInThread,
-                                        );
-                                      },
+                                    child: SmoothWheelInterceptor(
+                                      controller: _scrollOffsetController,
+                                      child: ScrollablePositionedList.separated(
+                                        itemScrollController: _itemScroll,
+                                        itemPositionsListener: _itemPositions,
+                                        scrollOffsetController:
+                                            _scrollOffsetController,
+                                        physics:
+                                            const NeverScrollableScrollPhysics(),
+                                        itemCount: _posts.length +
+                                            1 +
+                                            (_showTopLoader ? 1 : 0),
+                                        separatorBuilder: (context, index) =>
+                                            const Divider(height: 1),
+                                        itemBuilder: (context, index) {
+                                          // Top loader inserted before mainPost.
+                                          if (_showTopLoader && index == 0) {
+                                            return _buildTopLoader(context);
+                                          }
+                                          final adjustedIndex =
+                                              _showTopLoader ? index - 1 : index;
+                                          if (adjustedIndex == _posts.length) {
+                                            return _buildListFooter(context);
+                                          }
+                                          final p = _posts[adjustedIndex];
+                                          return AnimatedListItem(
+                                            index: adjustedIndex,
+                                            child: ThreadPostItem(
+                                              post: p,
+                                              index: adjustedIndex,
+                                              poUserHash: _poUserHash,
+                                              flashPostId: _flashingPostId,
+                                              flashPhase: _flashPhase,
+                                              onReply: () => _replyToPost(p.id),
+                                              isSearchMatch: _searchMatches
+                                                  .contains(adjustedIndex),
+                                              inThreadPostIds: _inThreadPostIds,
+                                              onRefInThread: _onRefInThread,
+                                            ),
+                                          );
+                                        },
+                                      ),
                                     ),
                                   ),
                     // 无缝跳转遮罩层
@@ -1498,9 +1570,11 @@ final class _ThreadPageState extends State<ThreadPage> {
                           final lastPostIndex = _posts.length - 1;
                           final lastItemIndex =
                               _itemIndexForPostIndex(lastPostIndex);
-                          _itemScroll.jumpTo(
+                          _itemScroll.scrollTo(
                             index: lastItemIndex,
                             alignment: 1,
+                            duration: const Duration(milliseconds: 400),
+                            curve: Curves.easeOutCubic,
                           );
                         });
                       } else {
@@ -1508,7 +1582,12 @@ final class _ThreadPageState extends State<ThreadPage> {
                             direction: _LoadDirection.refresh,
                             forceRefresh: true);
                         if (_itemScroll.isAttached) {
-                          _itemScroll.jumpTo(index: 0, alignment: 0);
+                          _itemScroll.scrollTo(
+                            index: 0,
+                            alignment: 0,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeOut,
+                          );
                         }
                       }
                     },
@@ -1518,7 +1597,10 @@ final class _ThreadPageState extends State<ThreadPage> {
           );
         },
       ),
-        );
+        ),
+      ),
+      ),
+    );
   }
 }
 

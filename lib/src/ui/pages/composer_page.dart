@@ -10,6 +10,7 @@ import 'package:xdnmb_api/xdnmb_api.dart' as api;
 import 'package:desktop_drop/desktop_drop.dart';
 
 import '../../app/app_state.dart';
+import '../../app/composer_controller.dart';
 import '../../app/cookie_controller.dart';
 import '../../data/cookie_store.dart';
 import '../../data/draft_store.dart';
@@ -347,6 +348,13 @@ final class _ComposerPageState extends State<ComposerPage> {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('发送成功')));
 
+      // Notify main window to refresh so the user can see their new post.
+      try {
+        context.read<ComposerController>().refreshSignal.value++;
+      } catch (_) {
+        // ignore: best-effort only
+      }
+
       api.Thread? threadHead;
       if (mainPostId != null) {
         try {
@@ -382,28 +390,36 @@ final class _ComposerPageState extends State<ComposerPage> {
       }
 
       // Record post history (successful submit only).
-      // ignore: discarded_futures
-      _postHistoryStore.record(
-        PostHistoryEntry(
-          isReply: isReply,
-          forumId: forumId,
-          mainPostId: mainPostId,
-          replyPostId: replyPostId,
-          title: title,
-          content: content,
-          postedAt: DateTime.now(),
-      threadUserHash: threadHead?.mainPost.userHash.trim().isEmpty == true
-        ? null
-        : threadHead?.mainPost.userHash.trim(),
-      threadIsAdmin: threadHead?.mainPost.isAdmin,
-      threadPostTime: threadHead?.mainPost.postTime,
-      threadReplyCount: threadHead?.mainPost.replyCount,
-      threadThumbImageUrl: threadHead?.mainPost.thumbImageUrl,
-      threadContent: threadHead?.mainPost.content,
-      replyPage: replyPage,
-        ),
-      );
-  await _clearDraft();
+      try {
+        await _postHistoryStore.record(
+          PostHistoryEntry(
+            isReply: isReply,
+            forumId: forumId,
+            mainPostId: mainPostId,
+            replyPostId: replyPostId,
+            title: title,
+            content: content,
+            postedAt: DateTime.now(),
+            threadUserHash: threadHead?.mainPost.userHash.trim().isEmpty == true
+                ? null
+                : threadHead?.mainPost.userHash.trim(),
+            threadIsAdmin: threadHead?.mainPost.isAdmin,
+            threadPostTime: threadHead?.mainPost.postTime,
+            threadReplyCount: threadHead?.mainPost.replyCount,
+            threadThumbImageUrl: threadHead?.mainPost.thumbImageUrl,
+            threadContent: threadHead?.mainPost.content,
+            replyPage: replyPage,
+          ),
+        );
+      } catch (_) {
+        // ignore: best-effort only
+      }
+
+      // Give user time to read the toast before closing.
+      await Future.delayed(const Duration(milliseconds: 800));
+      if (!mounted) return;
+
+      await _clearDraft();
       Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
@@ -746,69 +762,28 @@ final class _EmoticonButton extends StatefulWidget {
   State<_EmoticonButton> createState() => _EmoticonButtonState();
 }
 
-final class _EmoticonButtonState extends State<_EmoticonButton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 400),
-    )..addListener(() => setState(() {}));
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  void _onLongPressStart(LongPressStartDetails _) {
-    _ctrl.forward(from: 0);
-  }
-
-  void _onLongPressEnd(LongPressEndDetails _) {
-    if (_ctrl.isCompleted) {
-      Clipboard.setData(ClipboardData(text: widget.text));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('已复制: ${widget.name}'),
-            duration: const Duration(milliseconds: 800),
-          ),
-        );
-      }
+final class _EmoticonButtonState extends State<_EmoticonButton> {
+  void _onSecondaryTap() {
+    Clipboard.setData(ClipboardData(text: widget.text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已复制: ${widget.name}'),
+          duration: const Duration(milliseconds: 800),
+        ),
+      );
     }
-    _ctrl.reset();
-  }
-
-  void _onLongPressCancel() {
-    _ctrl.reset();
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final progress = _ctrl.value;
 
     return GestureDetector(
       onTap: () => widget.onInsert(widget.text),
-      onLongPressStart: _onLongPressStart,
-      onLongPressEnd: _onLongPressEnd,
-      onLongPressCancel: _onLongPressCancel,
+      onSecondaryTap: _onSecondaryTap,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-            stops: [progress, progress],
-            colors: [
-              cs.outlineVariant.withValues(alpha: 0.35),
-              Colors.transparent,
-            ],
-          ),
           border: Border.all(color: cs.outline.withValues(alpha: 0.5)),
           borderRadius: BorderRadius.circular(20),
         ),
@@ -821,7 +796,6 @@ final class _EmoticonButtonState extends State<_EmoticonButton>
               overflow: TextOverflow.visible,
               maxLines: 1,
               style: TextStyle(
-                fontFamily: 'Microsoft YaHei',
                 fontSize: widget.fontSize,
                 color: cs.primary,
               ),

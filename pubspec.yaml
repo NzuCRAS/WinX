@@ -84,6 +84,9 @@ dependencies:
   # Precise scroll-to-index for reply jump and reading progress anchor
   scrollable_positioned_list: ^0.3.8
 
+  # Smooth mouse wheel scrolling for desktop
+  smooth_list_view: ^2.0.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -110,6 +113,14 @@ flutter:
     - assets/岛娘.png
     - assets/岛徽.gif
     - assets/横幅.gif
+
+  fonts:
+    - family: Cantarell
+      fonts:
+        - asset: assets/fonts/Cantarell-Regular.ttf
+    - family: LXGWWenKai
+      fonts:
+        - asset: assets/fonts/LXGWWenKai-Regular.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

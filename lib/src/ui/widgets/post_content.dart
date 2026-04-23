@@ -7,6 +7,33 @@ import 'package:xdnmb_api/xdnmb_api.dart' as api;
 import '../../app/app_state.dart';
 import '../../app/settings_controller.dart';
 
+// ── Reference dialog shared state ──
+
+final _refDialogKey = GlobalKey<ReferenceDialogState>();
+var _refDialogOpen = false;
+
+/// Shows a reference dialog, reusing an existing one if already open.
+Future<void> showReferenceDialog(BuildContext context, int postId) async {
+  final st = _refDialogKey.currentState;
+  if (_refDialogOpen && st != null) {
+    st.push(postId);
+    return;
+  }
+
+  _refDialogOpen = true;
+  try {
+    await showDialog(
+      context: context,
+      builder: (context) => ReferenceDialog(
+        key: _refDialogKey,
+        initialPostId: postId,
+      ),
+    );
+  } finally {
+    _refDialogOpen = false;
+  }
+}
+
 /// Semi-rich text renderer:
 /// - clickable `>>123456` references (preview via API)
 /// - clickable URLs
@@ -48,9 +75,6 @@ final class _PostContentState extends State<PostContent> {
   // Advanced dice prefix: bold the digit before [n,m].
   static final _dicePrefix = RegExp(r'(\d+)\[(\d+),(\d+)\]');
 
-  static final _refDialogKey = GlobalKey<ReferenceDialogState>();
-  static bool _refDialogOpen = false;
-
   /// Recognizers created during the last build. Disposed before the next build
   /// and in [dispose].
   final List<GestureRecognizer> _recognizers = [];
@@ -81,7 +105,6 @@ final class _PostContentState extends State<PostContent> {
 
     final spans = <InlineSpan>[];
     final s = _normalizePostText(widget.text);
-    spans.addAll(_buildInlineSpans(context, s));
 
     // Use Selectors to only rebuild when the specific fields change,
     // rather than watching the entire SettingsController.
@@ -92,28 +115,41 @@ final class _PostContentState extends State<PostContent> {
       (SettingsController s) => s.contentLineHeight,
     );
     final fontFamily = context.select(
-      (SettingsController s) => s.fontFamily,
+      (SettingsController s) => s.contentFontFamily,
     );
+    final fontFamilyFallback = context.select(
+      (SettingsController s) => s.contentFontFallback,
+    );
+    final fontWeight = context.select(
+      (SettingsController s) => s.contentFontWeight,
+    );
+    final showLineBreak = context.select(
+      (SettingsController s) => s.showLineBreakIndicator,
+    );
+
+    spans.addAll(_buildInlineSpans(context, s, showLineBreak: showLineBreak));
 
     return SelectableText.rich(
       TextSpan(
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               fontSize: fontSize,
               height: lineHeight,
-              fontFamily: fontFamily.isEmpty ? null : fontFamily,
+              fontWeight: fontWeight,
+              fontFamily: fontFamily,
+              fontFamilyFallback: fontFamilyFallback,
             ),
         children: spans,
       ),
     );
   }
 
-  List<InlineSpan> _buildInlineSpans(BuildContext context, String s) {
+  List<InlineSpan> _buildInlineSpans(BuildContext context, String s, {required bool showLineBreak}) {
     final parts = <InlineSpan>[];
     var cursor = 0;
     for (final match in _spoiler.allMatches(s)) {
       if (match.start > cursor) {
         parts.addAll(_buildInlineSpansNoSpoiler(
-            context, s.substring(cursor, match.start)));
+            context, s.substring(cursor, match.start), showLineBreak: showLineBreak));
       }
 
       final inner = match.group(1) ?? '';
@@ -127,16 +163,17 @@ final class _PostContentState extends State<PostContent> {
     }
 
     if (cursor < s.length) {
-      parts.addAll(_buildInlineSpansNoSpoiler(context, s.substring(cursor)));
+      parts.addAll(_buildInlineSpansNoSpoiler(context, s.substring(cursor), showLineBreak: showLineBreak));
     }
     return parts;
   }
 
   List<InlineSpan> _buildInlineSpansNoSpoiler(
-      BuildContext context, String s) {
+      BuildContext context, String s, {required bool showLineBreak}) {
     final spans = <InlineSpan>[];
     final lines = s.split('\n');
     final green = _greentextColor(Theme.of(context));
+    final lineBreakColor = Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.45);
 
     for (int li = 0; li < lines.length; li++) {
       final line = lines[li];
@@ -146,6 +183,12 @@ final class _PostContentState extends State<PostContent> {
         baseStyle: line.startsWith('>') ? TextStyle(color: green) : null,
       ));
       if (li != lines.length - 1) {
+        if (showLineBreak) {
+          spans.add(TextSpan(
+            text: ' \u{21A9}',
+            style: TextStyle(color: lineBreakColor, fontSize: (Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14) * 0.82),
+          ));
+        }
         spans.add(const TextSpan(text: '\n'));
       }
     }
@@ -183,24 +226,7 @@ final class _PostContentState extends State<PostContent> {
               return;
             }
 
-            final st = _refDialogKey.currentState;
-            if (_refDialogOpen && st != null) {
-              st.push(id);
-              return;
-            }
-
-            _refDialogOpen = true;
-            try {
-              await showDialog(
-                context: context,
-                builder: (context) => ReferenceDialog(
-                  key: _refDialogKey,
-                  initialPostId: id,
-                ),
-              );
-            } finally {
-              _refDialogOpen = false;
-            }
+            await showReferenceDialog(context, id);
           }),
         ));
         i = refMatch.end;
@@ -577,10 +603,9 @@ String _normalizePostText(String input) {
   // Normalize newlines
   s = s.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
 
-  // Collapse excessive blank lines, but keep paragraph breaks (two newlines).
-  // Three+ consecutive newlines are usually unintended (from multiple HTML
-  // break conversions); two newlines are a legitimate paragraph separator.
-  s = s.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  // Collapse consecutive blank lines into a single newline to avoid
+  // excessive vertical spacing in rendered posts.
+  s = s.replaceAll(RegExp(r'\n{2,}'), '\n');
 
   return s;
 }

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
@@ -12,6 +14,7 @@ import 'post_history_store.dart';
 final class DatabaseHelper {
   static const _databaseName = 'xdnmb.db';
   static const _databaseVersion = 2;
+  static const _appDirName = 'xdnmb_client';
 
   // 表名
   static const _tableHistory = 'history';
@@ -45,11 +48,15 @@ final class DatabaseHelper {
         if (kDebugMode) debugPrint('Database dir (custom): $baseDir');
       } else {
         final documentsDirectory = await getApplicationDocumentsDirectory();
-        baseDir = documentsDirectory.path;
+        final appDir = Directory(path.join(documentsDirectory.path, _appDirName));
+        if (!await appDir.exists()) {
+          await appDir.create();
+        }
+        baseDir = appDir.path;
         if (kDebugMode) {
-          debugPrint('Database dir (documents): $baseDir');
+          debugPrint('Database dir (app dir): $baseDir');
           try {
-            final dirExists = await documentsDirectory.exists();
+            final dirExists = await appDir.exists();
             debugPrint('Database dir exists: $dirExists ($baseDir)');
           } catch (e) {
             debugPrint('Database dir exists check failed: $e');
@@ -63,6 +70,25 @@ final class DatabaseHelper {
     }
 
     final dbPath = path.join(baseDir, _databaseName);
+
+    // Migrate from old location (Documents root).
+    if (baseDir.contains(_appDirName)) {
+      try {
+        final oldDir = (await getApplicationDocumentsDirectory()).path;
+        final oldDbPath = path.join(oldDir, _databaseName);
+        final oldDbFile = File(oldDbPath);
+        final newDbFile = File(dbPath);
+        if (await oldDbFile.exists() && !await newDbFile.exists()) {
+          await oldDbFile.copy(newDbFile.path);
+          await oldDbFile.delete();
+          if (kDebugMode) {
+            debugPrint('Migrated database from $oldDbPath to $dbPath');
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) debugPrint('Database migration check failed: $e');
+      }
+    }
     if (kDebugMode) debugPrint('Database path: $dbPath');
     if (kDebugMode) debugPrint('Database init: resolved path durMs=${sw.elapsedMilliseconds}');
 

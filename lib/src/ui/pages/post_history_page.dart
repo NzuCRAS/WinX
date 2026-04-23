@@ -8,6 +8,7 @@ import '../../app/composer_controller.dart';
 import '../../app/settings_controller.dart';
 import '../widgets/cdn_fallback_image.dart';
 import '../widgets/list_preview.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
 import '../widgets/thread_list_item.dart';
 import 'thread_page.dart';
 
@@ -26,6 +27,8 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
   ///
   /// Key: mainPostId
   final Map<int, PostHistoryEntry> _threadHeadCache = <int, PostHistoryEntry>{};
+  final _threadScrollController = ScrollController();
+  final _replyScrollController = ScrollController();
 
   Future<void> _confirmRemoveAt(int storeIndex, PostHistoryEntry e) async {
     final where = e.isReply
@@ -69,6 +72,13 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
     setState(() {
       _future = next;
     });
+  }
+
+  @override
+  void dispose() {
+    _threadScrollController.dispose();
+    _replyScrollController.dispose();
+    super.dispose();
   }
 
   Future<PostHistoryEntry?> _ensureThreadHeadFor(PostHistoryEntry reply) async {
@@ -211,7 +221,9 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
               if (items.isEmpty) {
                 return const Center(child: Text('（空）'));
               }
-              return ListView.separated(
+              return SmoothListView.separated(
+                duration: const Duration(milliseconds: 350),
+                controller: _threadScrollController,
                 itemCount: items.length,
                 separatorBuilder: (context, index) => const Divider(height: 1),
                 itemBuilder: (context, i) {
@@ -483,7 +495,9 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                 final previewStyle = TextStyle(
                   fontSize: settings.contentFontSize,
                   height: settings.contentLineHeight,
-                  fontFamily: settings.fontFamily.isEmpty ? null : settings.fontFamily,
+                  fontWeight: settings.contentFontWeight,
+                  fontFamily: settings.contentFontFamily,
+                  fontFamilyFallback: settings.fontFamilyFallback,
                 );
 
                 String fmtTime(DateTime dt) {
@@ -667,7 +681,9 @@ final class _PostHistoryPageState extends State<PostHistoryPage> {
                 );
               }
 
-              return ListView.separated(
+              return SmoothListView.separated(
+                duration: const Duration(milliseconds: 350),
+                controller: _replyScrollController,
                 itemCount: replies.length,
                 separatorBuilder: (context, index) =>
                     const Divider(height: 1),

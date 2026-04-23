@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:xdnmb_api/xdnmb_api.dart' as api;
 
+import '../../app/settings_controller.dart';
 import 'post_content.dart';
 import 'thread_post_image.dart';
 
@@ -121,18 +123,29 @@ final class ThreadPostItem extends StatelessWidget {
 
   Widget _buildSageLabel(BuildContext context) {
     final baseSize = Theme.of(context).textTheme.labelSmall?.fontSize ?? 12;
+    final settings = context.read<SettingsController>();
     return Text(
       'SAGE ↓',
-      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: Theme.of(context).colorScheme.error,
-            fontWeight: FontWeight.w800,
-            fontSize: (baseSize * 1.25).clamp(10, 999),
-          ),
+      style: TextStyle(
+        color: Theme.of(context).colorScheme.error,
+        fontWeight: settings.uiFontWeight,
+        fontSize: (baseSize * 1.25).clamp(10, 999),
+        fontFamily: settings.uiFontFamily,
+        fontFamilyFallback: settings.uiFontFallback,
+      ),
     );
   }
 
   Widget _buildMetaRow(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final settings = context.read<SettingsController>();
+    final metaStyle = TextStyle(
+      fontSize: Theme.of(context).textTheme.labelMedium?.fontSize,
+      height: Theme.of(context).textTheme.labelMedium?.height,
+      fontWeight: settings.contentFontWeight,
+      fontFamily: settings.contentFontFamily,
+      fontFamilyFallback: settings.contentFontFallback,
+    );
     return Row(
       children: [
         Expanded(
@@ -143,11 +156,10 @@ final class ThreadPostItem extends StatelessWidget {
                   _cookieUserHash(post),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: post.isAdmin ? cs.error : cs.primary,
-                        fontWeight:
-                            post.isAdmin ? FontWeight.w700 : null,
-                      ),
+                  style: metaStyle.copyWith(
+                    color: post.isAdmin ? cs.error : cs.primary,
+                    fontWeight: post.isAdmin ? FontWeight.w700 : null,
+                  ),
                 ),
               ),
               if (poUserHash != null && post.userHash == poUserHash) ...[
@@ -161,10 +173,11 @@ final class ThreadPostItem extends StatelessWidget {
                   ),
                   child: Text(
                     'PO',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: cs.onPrimary,
-                          fontWeight: FontWeight.w700,
-                        ),
+                    style: metaStyle.copyWith(
+                      color: cs.onPrimary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: Theme.of(context).textTheme.labelSmall?.fontSize,
+                    ),
                   ),
                 ),
               ],
@@ -177,9 +190,9 @@ final class ThreadPostItem extends StatelessWidget {
               _formatToSeconds(post.postTime),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: cs.onSurfaceVariant,
-                  ),
+              style: metaStyle.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
             ),
           ),
         ),
@@ -196,9 +209,9 @@ final class ThreadPostItem extends StatelessWidget {
                   'No.${post.id}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: cs.primary,
-                      ),
+                  style: metaStyle.copyWith(
+                    color: cs.primary,
+                  ),
                 ),
               ),
             ),

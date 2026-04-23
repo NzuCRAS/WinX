@@ -14,15 +14,17 @@ import 'history_page.dart';
 import 'my_posts_page.dart';
 import 'subscription_page.dart';
 import 'user_manage_page.dart';
-import 'settings_page.dart';
+import 'settings_shell_page.dart';
 import '../../data/history_store.dart';
 import '../../data/forum_groups.dart';
 import '../../data/local_prefs.dart';
 import '../../data/update_service.dart';
 import '../../data/common_forums_store.dart';
 import '../../data/perf_log.dart';
+import '../widgets/animated_list_item.dart';
 import '../widgets/post_content.dart';
 import '../widgets/thread_list_item.dart';
+import 'package:smooth_list_view/smooth_list_view.dart';
 import '../widgets/composer_panel.dart';
 import '../widgets/resizable_divider.dart';
 
@@ -56,6 +58,7 @@ final class _HomePageState extends State<HomePage> {
   bool _hasMore = true;
   final List<api.ForumThread> _threads = [];
   final ScrollController _scrollController = ScrollController();
+  final ScrollController _sidebarScrollController = ScrollController();
 
   bool _announcementChecked = false;
 
@@ -118,7 +121,7 @@ final class _HomePageState extends State<HomePage> {
             label: '前往',
             onPressed: () {
               Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const SettingsPage()),
+                MaterialPageRoute(builder: (_) => const SettingsShellPage()),
               );
             },
           ),
@@ -192,7 +195,13 @@ final class _HomePageState extends State<HomePage> {
     // 0=start, 1=forum, 2=sub, 3=history, 4=myPosts, 5=user
     if (_sectionIndex == 1) {
       await _refreshThreads();
-      if (_scrollController.hasClients) _scrollController.jumpTo(0);
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          0,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
       return;
     }
 
@@ -210,6 +219,7 @@ final class _HomePageState extends State<HomePage> {
     _scrollController
       ..removeListener(_onScroll)
       ..dispose();
+    _sidebarScrollController.dispose();
     final composer = context.read<ComposerController>();
     composer.refreshSignal.removeListener(_onRefreshSignal);
     super.dispose();
@@ -568,7 +578,10 @@ final class _HomePageState extends State<HomePage> {
 
   return Scaffold(
       appBar: AppBar(
-        title: Text('xdnmb（${_selectedForumName ?? '未选择'}）'),
+        title: Text(
+          'xdnmb（${_selectedForumName ?? '未选择'}）',
+          style: TextStyle(fontFamilyFallback: settings.uiFontFallback),
+        ),
         actions: [
           IconButton(
             tooltip: '刷新页面',
@@ -579,7 +592,7 @@ final class _HomePageState extends State<HomePage> {
             tooltip: '设置',
             onPressed: () {
               Navigator.of(context).push(
-                MaterialPageRoute(builder: (context) => const SettingsPage()),
+                MaterialPageRoute(builder: (context) => const SettingsShellPage()),
               );
             },
             icon: const Icon(Icons.settings_outlined),
@@ -726,16 +739,27 @@ final class _HomePageState extends State<HomePage> {
     final baseTextStyle = theme.textTheme.bodyMedium?.copyWith(
           fontSize: settings.contentFontSize,
           height: settings.contentLineHeight,
-          fontFamily: settings.fontFamily,
+          fontWeight: settings.contentFontWeight,
+          fontFamily: settings.contentFontFamily,
+          fontFamilyFallback: settings.contentFontFallback,
+        );
+    final uiTextStyle = theme.textTheme.bodyMedium?.copyWith(
+          fontSize: settings.contentFontSize,
+          height: settings.contentLineHeight,
+          fontWeight: settings.uiFontWeight,
+          fontFamily: settings.uiFontFamily,
+          fontFamilyFallback: settings.uiFontFallback,
         );
 
     return Material(
       color: theme.colorScheme.surface,
       child: DefaultTextStyle(
         style: baseTextStyle ?? const TextStyle(),
-        child: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        children: [
+        child: SmoothListView(
+          duration: const Duration(milliseconds: 350),
+          controller: _sidebarScrollController,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          children: [
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Column(
@@ -770,7 +794,7 @@ final class _HomePageState extends State<HomePage> {
                             child: Text(
                               'xdnmb',
                               style: theme.textTheme.titleMedium?.copyWith(
-                                fontFamily: settings.fontFamily,
+                                fontFamilyFallback: settings.uiFontFallback,
                               ),
                             ),
                           ),
@@ -835,7 +859,7 @@ final class _HomePageState extends State<HomePage> {
           if (_sidebarExpanded) ...[
             if (commonForums.isNotEmpty)
               ExpansionTile(
-                title: const Text('常用'),
+                title: Text('常用', style: uiTextStyle),
                 initiallyExpanded: true,
                 children: [
                   for (final forum in commonForums)
@@ -875,7 +899,7 @@ final class _HomePageState extends State<HomePage> {
                   ..sort((a, b) => a.id.compareTo(b.id));
 
                 return ExpansionTile(
-                  title: const Text('时间线'),
+                  title: Text('时间线', style: uiTextStyle),
                   initiallyExpanded: false,
                   children: [
                     if (timelines.isEmpty)
@@ -886,7 +910,7 @@ final class _HomePageState extends State<HomePage> {
                           style: theme.textTheme.bodySmall?.copyWith(
                             fontSize: (settings.contentFontSize - 2).clamp(10, 999),
                             height: settings.contentLineHeight,
-                            fontFamily: settings.fontFamily,
+                            fontFamilyFallback: settings.uiFontFallback,
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
@@ -918,7 +942,7 @@ final class _HomePageState extends State<HomePage> {
               }
 
               return ExpansionTile(
-                title: Text(g.title),
+                title: Text(g.title, style: uiTextStyle),
                 initiallyExpanded: false,
                 children: [
                   for (final forum in g.forums)
@@ -1122,7 +1146,8 @@ final class _HomePageState extends State<HomePage> {
   // Start page with a single random cover under the title area.
     return LayoutBuilder(
       builder: (context, c) {
-        return ListView(
+        return SmoothListView(
+          duration: const Duration(milliseconds: 350),
           padding: const EdgeInsets.all(12),
           children: [
             StartPage(
@@ -1144,10 +1169,11 @@ final class _HomePageState extends State<HomePage> {
 
     return RefreshIndicator(
       onRefresh: _refreshThreads,
-      child: ListView.separated(
+      child: SmoothListView.separated(
+        duration: const Duration(milliseconds: 350),
         controller: _scrollController,
         itemCount: _threads.length + 1,
-  separatorBuilder: (context, index) => const Divider(height: 1),
+        separatorBuilder: (context, index) => const Divider(height: 1),
         itemBuilder: (context, index) {
           if (index == _threads.length) {
             return Padding(
@@ -1162,33 +1188,37 @@ final class _HomePageState extends State<HomePage> {
 
           final t = _threads[index];
           final p = t.mainPost;
-      final trimmedTitle = p.title.trim();
-      final hasVisibleTitle =
-        trimmedTitle.isNotEmpty && trimmedTitle != '无标题';
-          return ThreadListItem(
-            thumbUrl: p.thumbImageUrl,
-            title: hasVisibleTitle ? trimmedTitle : null,
-            content: p.content,
-            cookie: p.userHash,
-            time: p.postTime,
-            isAdmin: p.isAdmin,
-            isSage: p.isSage,
-            onTap: () {
-              // Best-effort record visit at entry point.
-              // ignore: discarded_futures
-              _historyStore.recordVisit(
-                threadId: p.id,
-                title: hasVisibleTitle ? trimmedTitle : null,
-              );
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => ThreadPage(
-                    mainPostId: p.id,
-                    title: hasVisibleTitle ? trimmedTitle : null,
+          final trimmedTitle = p.title.trim();
+          final hasVisibleTitle =
+              trimmedTitle.isNotEmpty && trimmedTitle != '无标题';
+          return AnimatedListItem(
+            index: index,
+            child: ThreadListItem(
+              thumbUrl: p.thumbImageUrl,
+              title: hasVisibleTitle ? trimmedTitle : null,
+              content: p.content,
+              cookie: p.userHash,
+              time: p.postTime,
+              isAdmin: p.isAdmin,
+              isSage: p.isSage,
+              replyCount: p.replyCount,
+              onTap: () {
+                // Best-effort record visit at entry point.
+                // ignore: discarded_futures
+                _historyStore.recordVisit(
+                  threadId: p.id,
+                  title: hasVisibleTitle ? trimmedTitle : null,
+                );
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => ThreadPage(
+                      mainPostId: p.id,
+                      title: hasVisibleTitle ? trimmedTitle : null,
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           );
         },
       ),

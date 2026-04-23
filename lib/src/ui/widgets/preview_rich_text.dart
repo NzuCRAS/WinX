@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../../app/settings_controller.dart';
 import 'list_preview.dart';
 
 /// Lightweight rich renderer for list previews.
@@ -26,6 +28,10 @@ final class PreviewRichText extends StatelessWidget {
   Widget build(BuildContext context) {
     final baseStyle = style ?? DefaultTextStyle.of(context).style;
     final normalized = normalizeForListPreview(text);
+    final showLineBreak = context.select(
+      (SettingsController s) => s.showLineBreakIndicator,
+    );
+    final lineBreakColor = Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.45);
 
     final spans = <InlineSpan>[];
     final lines = normalized.split('\n');
@@ -66,6 +72,12 @@ final class PreviewRichText extends StatelessWidget {
       }
 
       if (li != lines.length - 1) {
+        if (showLineBreak) {
+          spans.add(TextSpan(
+            text: ' \u{21A9}',
+            style: TextStyle(color: lineBreakColor, fontSize: (baseStyle.fontSize ?? 14) * 0.82),
+          ));
+        }
         spans.add(const TextSpan(text: '\n'));
       }
     }
