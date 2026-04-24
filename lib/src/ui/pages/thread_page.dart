@@ -21,7 +21,6 @@ import '../widgets/animated_list_item.dart';
 import '../widgets/composer_panel.dart';
 import '../widgets/post_content.dart';
 import '../widgets/resizable_divider.dart';
-import '../widgets/smooth_scroll.dart';
 import '../widgets/thread_post_item.dart';
 
 final class BackIntent extends Intent {
@@ -78,8 +77,6 @@ final class _ThreadPageState extends State<ThreadPage> {
   bool _hasMore = true;
   final ItemScrollController _itemScroll = ItemScrollController();
   final ItemPositionsListener _itemPositions = ItemPositionsListener.create();
-  final ScrollOffsetController _scrollOffsetController =
-      ScrollOffsetController();
 
   // True while [_loadSurroundingPages] is running. Used to defer
   // jump-failure handling until all surrounding pages are loaded.
@@ -1462,48 +1459,41 @@ final class _ThreadPageState extends State<ThreadPage> {
                                       }
                                       return false;
                                     },
-                                    child: SmoothWheelInterceptor(
-                                      controller: _scrollOffsetController,
-                                      child: ScrollablePositionedList.separated(
-                                        itemScrollController: _itemScroll,
-                                        itemPositionsListener: _itemPositions,
-                                        scrollOffsetController:
-                                            _scrollOffsetController,
-                                        physics:
-                                            const NeverScrollableScrollPhysics(),
-                                        itemCount: _posts.length +
-                                            1 +
-                                            (_showTopLoader ? 1 : 0),
-                                        separatorBuilder: (context, index) =>
-                                            const Divider(height: 1),
-                                        itemBuilder: (context, index) {
-                                          // Top loader inserted before mainPost.
-                                          if (_showTopLoader && index == 0) {
-                                            return _buildTopLoader(context);
-                                          }
-                                          final adjustedIndex =
-                                              _showTopLoader ? index - 1 : index;
-                                          if (adjustedIndex == _posts.length) {
-                                            return _buildListFooter(context);
-                                          }
-                                          final p = _posts[adjustedIndex];
-                                          return AnimatedListItem(
+                                    child: ScrollablePositionedList.separated(
+                                      itemScrollController: _itemScroll,
+                                      itemPositionsListener: _itemPositions,
+                                      itemCount: _posts.length +
+                                          1 +
+                                          (_showTopLoader ? 1 : 0),
+                                      separatorBuilder: (context, index) =>
+                                          const Divider(height: 1),
+                                      itemBuilder: (context, index) {
+                                        // Top loader inserted before mainPost.
+                                        if (_showTopLoader && index == 0) {
+                                          return _buildTopLoader(context);
+                                        }
+                                        final adjustedIndex =
+                                            _showTopLoader ? index - 1 : index;
+                                        if (adjustedIndex == _posts.length) {
+                                          return _buildListFooter(context);
+                                        }
+                                        final p = _posts[adjustedIndex];
+                                        return AnimatedListItem(
+                                          index: adjustedIndex,
+                                          child: ThreadPostItem(
+                                            post: p,
                                             index: adjustedIndex,
-                                            child: ThreadPostItem(
-                                              post: p,
-                                              index: adjustedIndex,
-                                              poUserHash: _poUserHash,
-                                              flashPostId: _flashingPostId,
-                                              flashPhase: _flashPhase,
-                                              onReply: () => _replyToPost(p.id),
-                                              isSearchMatch: _searchMatches
-                                                  .contains(adjustedIndex),
-                                              inThreadPostIds: _inThreadPostIds,
-                                              onRefInThread: _onRefInThread,
-                                            ),
-                                          );
-                                        },
-                                      ),
+                                            poUserHash: _poUserHash,
+                                            flashPostId: _flashingPostId,
+                                            flashPhase: _flashPhase,
+                                            onReply: () => _replyToPost(p.id),
+                                            isSearchMatch: _searchMatches
+                                                .contains(adjustedIndex),
+                                            inThreadPostIds: _inThreadPostIds,
+                                            onRefInThread: _onRefInThread,
+                                          ),
+                                        );
+                                      },
                                     ),
                                   ),
                     // 无缝跳转遮罩层
@@ -1603,5 +1593,6 @@ final class _ThreadPageState extends State<ThreadPage> {
     );
   }
 }
+
 
 

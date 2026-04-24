@@ -150,6 +150,7 @@ class _SmoothWheelInterceptorState extends State<SmoothWheelInterceptor> {
       // Batch rapid wheel events into a single animated scroll.
       _debounce = Timer(const Duration(milliseconds: 16), () {
         if (!mounted) return;
+
         final delta = _pendingDelta;
         _pendingDelta = 0;
 
