@@ -4,7 +4,6 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:xdnmb_api/xdnmb_api.dart' as api;
 
 import '../../app/app_state.dart';
@@ -18,6 +17,7 @@ import '../../data/thread_cursor.dart';
 import '../../data/perf_log.dart';
 import '../../data/xdnmb_repository.dart';
 import '../widgets/animated_list_item.dart';
+import '../widgets/smooth_scroll.dart';
 import '../widgets/composer_panel.dart';
 import '../widgets/post_content.dart';
 import '../widgets/resizable_divider.dart';
@@ -28,12 +28,6 @@ final class BackIntent extends Intent {
 }
 
 enum _LoadDirection { refresh, append, prepend }
-
-final class _ScrollAnchor {
-  final int index;
-  final double leadingEdge;
-  const _ScrollAnchor({required this.index, required this.leadingEdge});
-}
 
 final class ThreadPage extends StatefulWidget {
   final int mainPostId;
@@ -55,7 +49,7 @@ final class ThreadPage extends StatefulWidget {
   State<ThreadPage> createState() => _ThreadPageState();
 }
 
-final class _ThreadPageState extends State<ThreadPage> {
+final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserver {
   final _subStore = const SubscriptionStore();
   final _historyStore = HistoryStore();
   bool _subWorking = false;
@@ -75,8 +69,13 @@ final class _ThreadPageState extends State<ThreadPage> {
   int _page = 1;
   bool _loadingPage = false;
   bool _hasMore = true;
-  final ItemScrollController _itemScroll = ItemScrollController();
-  final ItemPositionsListener _itemPositions = ItemPositionsListener.create();
+
+  // Standard ListView scroll controller with smooth wheel support.
+  final SmoothScrollController _scrollController = SmoothScrollController();
+
+  // Keys for each post so we can jump to a specific post via
+  // Scrollable.ensureVisible.
+  final List<GlobalKey> _postKeys = [];
 
   // True while [_loadSurroundingPages] is running. Used to defer
   // jump-failure handling until all surrounding pages are loaded.
@@ -91,11 +90,6 @@ final class _ThreadPageState extends State<ThreadPage> {
   // Held so we can flush progress in [dispose] without touching [context].
   LocalPrefs? _prefsRef;
 
-  // Last known reading anchor, updated on every scroll persist so we can
-  // save the *most recent* position when the page is destroyed.
-  int? _lastReadPostId;
-  int? _lastReadPage;
-
   // ---- Cursor v2 (KV-JSON) ----
   // Main thread cursor: single source of truth per thread.
   static const String _kThreadMainCursorPrefix = 'xdnmb.threadCursor.main.';
@@ -104,6 +98,7 @@ final class _ThreadPageState extends State<ThreadPage> {
 
   // Reply jump target (from post history).
   int? _jumpTargetPostId;
+  double? _jumpTargetAlignment; // Saved alignment for precise cursor restore
   int? _flashingPostId; // The post currently being flash-highlighted
   int _flashPhase = 0; // increments to trigger rebuilds during flashing
   bool _showBackToTop = false;
@@ -116,6 +111,14 @@ final class _ThreadPageState extends State<ThreadPage> {
 
   // Safety timer: force-reveal content if jump takes too long.
   Timer? _jumpTimeout;
+
+  // In-memory cursor cache: updated on every scroll event, persisted every 5s.
+  ThreadMainCursor? _cachedCursor;
+  Timer? _saveTimer;
+
+  // Last successfully persisted cursor — used as a fallback when dispose()
+  // fires after the ScrollController has already been detached.
+  ThreadMainCursor? _lastCursor;
 
   // Flattened view: first main post then replies.
   final _posts = <api.PostBase>[];
@@ -150,6 +153,9 @@ final class _ThreadPageState extends State<ThreadPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_onScroll);
+
     final flash = widget.flashPostId;
     final initialPage = widget.initialPage;
 
@@ -189,12 +195,25 @@ final class _ThreadPageState extends State<ThreadPage> {
       PerfLog.log('thread.init path=normalBrowse threadId=${widget.mainPostId}');
       _initWithMainCursor();
     }
+
+    // Periodically flush the in-memory cursor to disk every 5 seconds.
+    _saveTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) _flushCursorOnExit();
+    });
   }
 
   void _onRefreshSignal() {
     if (mounted) {
       _loadPage(1,
           direction: _LoadDirection.refresh, forceRefresh: true);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _flushCursorOnExit();
     }
   }
 
@@ -238,12 +257,13 @@ final class _ThreadPageState extends State<ThreadPage> {
 
     if (mainCursor != null && mainCursor.threadId == widget.mainPostId) {
       _jumpTargetPostId = mainCursor.anchorPostId;
+      _jumpTargetAlignment = mainCursor.alignment;
       if (mainCursor.page != null && mainCursor.page! > 0) {
         _page = mainCursor.page!;
         _hideContentUntilJump = true;
         _startJumpTimeout();
       }
-      PerfLog.log('thread.mainCursor.restore ok threadId=${widget.mainPostId} page=$_page anchor=$_jumpTargetPostId');
+      PerfLog.log('thread.mainCursor.restore ok threadId=${widget.mainPostId} page=$_page anchor=$_jumpTargetPostId alignment=${mainCursor.alignment}');
     } else {
       PerfLog.log('thread.mainCursor.restore miss threadId=${widget.mainPostId} raw=${rawCursor == null ? 'null' : rawCursor.substring(0, min(80, rawCursor.length))}');
     }
@@ -297,62 +317,96 @@ final class _ThreadPageState extends State<ThreadPage> {
     _jumpTimeout = null;
   }
 
-  /// Snapshot the current scroll position and persist it as the main cursor.
-  /// Safe to call from [dispose] because it uses [_prefsRef] instead of
-  /// [context.read].
-  void _persistReadingProgress() {
-    if (_posts.isEmpty) return;
-    // Skip while jump animation is in progress; the intermediate scroll
-    // position is not meaningful reading progress.
-    if (_hideContentUntilJump) return;
+  /// Compute the current scroll position into a [ThreadMainCursor] without
+  /// touching disk. Returns null when the viewport is not ready or the thread
+  /// is still loading.
+  ThreadMainCursor? _computeCursor() {
+    if (_posts.isEmpty) return null;
+    if (!_scrollController.hasClients) return null;
 
-    final positions = _itemPositions.itemPositions.value;
-    if (positions.isEmpty) return;
+    final pos = _scrollController.position;
+    final viewportTop = pos.pixels;
+    final viewportHeight = pos.viewportDimension;
 
-    final visible = positions
-        .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
-        .toList(growable: false);
-    if (visible.isEmpty) return;
+    int? anchorPostId;
+    double? savedAlignment;
 
-    // Save the *bottom-most* visible item as the reading anchor.
-    // Users read top-to-bottom; the last seen item is a better
-    // progress marker than the top-of-screen item.
-    visible.sort((a, b) => a.itemLeadingEdge.compareTo(b.itemLeadingEdge));
-    final last = visible.last;
-    // Convert item index to post index (accounting for top loader offset).
-    final rawPostIdx = _showTopLoader ? last.index - 1 : last.index;
-    final postIdx = rawPostIdx.clamp(0, _posts.length - 1);
-    final postId = _posts[postIdx].id;
+    final scrollableContext = pos.context.notificationContext;
+    final scrollableBox = scrollableContext?.findRenderObject() as RenderBox?;
+    final scrollableDy = scrollableBox?.localToGlobal(Offset.zero).dy ?? 0;
+
+    for (var i = 0; i < _posts.length && i < _postKeys.length; i++) {
+      final context = _postKeys[i].currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null) continue;
+
+      final itemDy = box.localToGlobal(Offset.zero).dy;
+      final relativeTop = itemDy - scrollableDy;
+      final relativeBottom = relativeTop + box.size.height;
+
+      if (relativeBottom > 0 && relativeTop < viewportHeight) {
+        anchorPostId = _posts[i].id;
+        savedAlignment = (relativeTop / viewportHeight).clamp(0.0, 1.0);
+        break;
+      }
+    }
+
+    if (anchorPostId == null) {
+      final totalExtent = pos.maxScrollExtent + viewportHeight;
+      if (totalExtent <= 0) return null;
+      final avgItemHeight = totalExtent / _posts.length;
+      final firstVisibleIndex =
+          (viewportTop / avgItemHeight).floor().clamp(0, _posts.length - 1);
+      anchorPostId = _posts[firstVisibleIndex].id;
+      savedAlignment = 0.0;
+    }
+
+    final postIdx = _posts.indexWhere((p) => p.id == anchorPostId);
+    final locatedPage =
+        _postIdToPage[anchorPostId] ?? _pageFromFlatIndex(postIdx);
+
+    return ThreadMainCursor(
+      threadId: widget.mainPostId,
+      anchorPostId: anchorPostId,
+      page: locatedPage,
+      alignment: savedAlignment?.clamp(0.0, 1.0) ?? 0.0,
+    );
+  }
+
+  /// Flush the in-memory cursor to disk. Safe to call from [dispose] because
+  /// it uses [_prefsRef] instead of [context.read] and does not touch
+  /// RenderBox.
+  void _flushCursorOnExit() {
+    final cursor = _cachedCursor ?? _lastCursor;
+    if (cursor == null) return;
 
     final prefs = _prefsRef;
     if (prefs == null) return;
 
-    // Derive page via the exact lookup table (falls back to arithmetic when
-    // the post hasn't been recorded yet, e.g. very first load).
-    final locatedPage = _postIdToPage[postId] ?? _pageFromFlatIndex(postIdx);
-    final arithmeticPage = _pageFromFlatIndex(postIdx);
-    _lastReadPostId = postId;
-    _lastReadPage = locatedPage;
+    PerfLog.log(
+        'thread.flush postId=${cursor.anchorPostId} page=${cursor.page} alignment=${cursor.alignment}');
 
-    PerfLog.log('thread.persist postId=$postId postIdx=$postIdx locatedPage=$locatedPage(arithmetic=$arithmeticPage) mapSize=${_postIdToPage.length}');
-
-    // v2 (preferred): KV-JSON blob.
     final mainCursorKey = '$_kThreadMainCursorPrefix${widget.mainPostId}';
-    final cursor = ThreadMainCursor(
-      threadId: widget.mainPostId,
-      anchorPostId: postId,
-      topIndexHint: postIdx,
-      page: locatedPage,
-    );
     // ignore: discarded_futures
     prefs.setThreadCursor(mainCursorKey, cursor.toJsonString());
   }
 
   @override
   void dispose() {
-    // Snapshot the final scroll position at exit time rather than
-    // debouncing on every scroll event.
-    _persistReadingProgress();
+    WidgetsBinding.instance.removeObserver(this);
+    _scrollController.removeListener(_onScroll);
+
+    // Flush the last known cursor to disk BEFORE disposing the controller.
+    // _cachedCursor is updated on every scroll event, so we don't need to
+    // re-compute RenderBox positions here (which would fail if ListView has
+    // already unmounted).
+    _flushCursorOnExit();
+
+    _scrollController.dispose();
+
+    _saveTimer?.cancel();
+    _saveTimer = null;
 
     _jumpTimeout?.cancel();
     _jumpTimeout = null;
@@ -362,12 +416,6 @@ final class _ThreadPageState extends State<ThreadPage> {
     _repoRef = null;
     _prefsRef = null;
     super.dispose();
-  }
-
-  /// Convert a [_posts] array index to the actual ScrollablePositionedList
-  /// item index, accounting for the optional top loader item.
-  int _itemIndexForPostIndex(int postIndex) {
-    return postIndex + (_showTopLoader ? 1 : 0);
   }
 
   void _scrollToPostId(
@@ -381,35 +429,66 @@ final class _ThreadPageState extends State<ThreadPage> {
       return;
     }
 
-    // If called before list attaches, schedule once after next frame.
-    if (!_itemScroll.isAttached) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        if (_posts.isEmpty) return;
-        if (!_itemScroll.isAttached) return;
-        // Ensure index is still valid after potential reload.
-        final nextIdx = _posts.indexWhere((p) => p.id == postId);
-        if (nextIdx < 0) return;
-        _scrollToPostId(postId, alignment: alignment, flash: flash);
-      });
+    // Ensure the key exists.
+    while (_postKeys.length <= idx) {
+      _postKeys.add(GlobalKey());
+    }
+
+    final context = _postKeys[idx].currentContext;
+    if (context != null) {
+      // Target is already built — scroll directly.
+      _doEnsureVisible(context, postId: postId, flash: flash);
       return;
     }
 
-    final itemIdx = _itemIndexForPostIndex(idx);
-    PerfLog.log('thread.scroll postId=$postId postIdx=$idx itemIdx=$itemIdx alignment=$alignment flash=$flash');
-    final f = _itemScroll.scrollTo(
-      index: itemIdx,
-      alignment: alignment,
+    // Target not built yet (ListView lazily loads off-screen items).
+    // Jump to an estimated offset so the target enters the viewport,
+    // then retry ensureVisible after the next frame.
+    if (_scrollController.hasClients) {
+      final pos = _scrollController.position;
+      final totalExtent = pos.maxScrollExtent + pos.viewportDimension;
+      if (totalExtent > 0) {
+        final avgItemHeight = totalExtent / _posts.length;
+        final estimatedOffset =
+            idx * avgItemHeight - alignment * pos.viewportDimension;
+        _scrollController
+            .jumpTo(estimatedOffset.clamp(0.0, pos.maxScrollExtent));
+      }
+    }
+
+    // Retry after the frame so the target widget gets built.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final retryIdx = _posts.indexWhere((p) => p.id == postId);
+      if (retryIdx < 0 || retryIdx >= _postKeys.length) return;
+      final retryContext = _postKeys[retryIdx].currentContext;
+      if (retryContext != null) {
+        _doEnsureVisible(retryContext, postId: postId, flash: flash);
+      } else {
+        // Still not built — give up and reveal content.
+        if (_hideContentUntilJump) {
+          setState(() => _hideContentUntilJump = false);
+          _cancelJumpTimeout();
+        }
+        if (flash) _triggerFlash(postId);
+      }
+    });
+  }
+
+  void _doEnsureVisible(
+    BuildContext context, {
+    required int postId,
+    required bool flash,
+  }) {
+    Scrollable.ensureVisible(
+      context,
+      alignment: 0.0,
       duration: const Duration(milliseconds: 320),
       curve: Curves.easeOutCubic,
     );
 
-    // 定位完成后再展示内容，形成”无缝跳转”。
-    // 注意：scrollTo 的 Future 在列表 attach 且动画结束后完成。
-    // 这里不等待图片加载，只保证首屏位置正确。
     if (_hideContentUntilJump) {
-      // ignore: discarded_futures
-      f.then((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         if (_hideContentUntilJump) {
           setState(() => _hideContentUntilJump = false);
@@ -419,12 +498,10 @@ final class _ThreadPageState extends State<ThreadPage> {
       });
     }
     if (flash) {
-      // ignore: discarded_futures
-      f.then((_) {
-  if (!mounted) return;
-        // Only flash if the post still exists.
-  if (_posts.indexWhere((p) => p.id == postId) < 0) return;
-  _triggerFlash(postId);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_posts.indexWhere((p) => p.id == postId) < 0) return;
+        _triggerFlash(postId);
       });
     }
   }
@@ -438,15 +515,21 @@ final class _ThreadPageState extends State<ThreadPage> {
     final idx = _posts.indexWhere((p) => p.id == id);
     if (idx >= 0) {
       PerfLog.log('thread.jump.found id=$id idx=$idx posts=${_posts.length} loadedMin=$_loadedMinReplyPage loadedMax=$_loadedMaxReplyPage');
+      // Capture alignment before clearing jump target.
+      final savedAlignment = _jumpTargetAlignment;
       // 立即清除 jump target，防止 _loadSurroundingPages 末尾的
       // _handleJumpFailed callback 被错误触发。
       _jumpTargetPostId = null;
+      _jumpTargetAlignment = null;
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         final isFromReplyHistory = widget.flashPostId != null;
 
-        _scrollToPostId(id, alignment: 0.0, flash: isFromReplyHistory);
+        // Use saved alignment for precise cursor restore; default to top (0.0)
+        // when no alignment was recorded (legacy cursor or fresh thread).
+        final restoredAlignment = savedAlignment ?? 0.0;
+        _scrollToPostId(id, alignment: restoredAlignment, flash: isFromReplyHistory);
 
         // If we're jumping from reply history, persist a reply cursor keyed by
         // (threadId + replyPostId) so future jumps are immediate.
@@ -490,6 +573,7 @@ final class _ThreadPageState extends State<ThreadPage> {
   void _handleJumpFailed() {
     final fallbackId = _jumpTargetPostId;
     _jumpTargetPostId = null;
+    _jumpTargetAlignment = null;
 
     // 优先通过精确的 postId 在已加载内容中查找回退位置，
     // 避免依赖不稳定的 flat index（恢复时 _posts 长度可能完全不同）。
@@ -532,54 +616,40 @@ final class _ThreadPageState extends State<ThreadPage> {
   }
 
   void _onScroll() {
-    final positions = _itemPositions.itemPositions.value;
+    if (!_scrollController.hasClients) return;
 
-    // Back to top button: show when first visible index is deep enough.
-    var show = false;
-    if (positions.isNotEmpty) {
-      final minIndex = positions
-          .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
-          .fold<int?>(null, (min, p) {
-        if (min == null) return p.index;
-        return p.index < min ? p.index : min;
-      });
-      show = (minIndex ?? 0) >= 5;
+    // If the user scrolls while we're still hiding content for a jump,
+    // reveal content immediately — the user wants to browse manually.
+    if (_hideContentUntilJump) {
+      setState(() => _hideContentUntilJump = false);
+      _cancelJumpTimeout();
     }
+
+    final pos = _scrollController.position;
+
+    // Back to top button: show when scrolled deep enough.
+    final show = pos.pixels > 240;
     if (show != _showBackToTop) setState(() => _showBackToTop = show);
+
+    // ---- Update in-memory cursor cache (persisted every 5s by _saveTimer) ----
+    final cursor = _computeCursor();
+    if (cursor != null) {
+      _cachedCursor = cursor;
+      _lastCursor = cursor;
+    }
 
     final settings = context.read<SettingsController>();
     if (!settings.autoLoadOnScroll || _loadingPage) return;
 
     // ---- Auto-load previous page when near top ----
-    if (_hasPreviousPage) {
-      final firstVisible = positions
-          .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
-          .fold<int?>(null, (min, p) {
-        if (min == null) return p.index;
-        return p.index < min ? p.index : min;
-      });
-      final topThreshold = _showTopLoader ? 2 : 1;
-      if (firstVisible != null && firstVisible <= topThreshold) {
-        _loadPreviousPage();
-        return; // Prevent double-trigger in same frame.
-      }
+    if (_hasPreviousPage && pos.pixels <= pos.minScrollExtent + 100) {
+      _loadPreviousPage();
+      return;
     }
 
     // ---- Auto-load next page when near bottom ----
-    if (_hasMore) {
-      final lastVisible = positions
-          .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
-          .fold<int?>(null, (max, p) {
-        if (max == null) return p.index;
-        return p.index > max ? p.index : max;
-      });
-      // Adjust for top loader offset when comparing against _posts length.
-      final adjustedLast = _showTopLoader && lastVisible != null
-          ? lastVisible - 1
-          : lastVisible;
-      if (adjustedLast != null && adjustedLast >= _posts.length - 4) {
-        _loadNextPage();
-      }
+    if (_hasMore && pos.pixels >= pos.maxScrollExtent - 100) {
+      _loadNextPage();
     }
   }
 
@@ -610,27 +680,9 @@ final class _ThreadPageState extends State<ThreadPage> {
     );
 
     // Record scroll anchor before prepend so we can restore visual position.
-    _ScrollAnchor? anchor;
-    if (direction == _LoadDirection.prepend && _itemScroll.isAttached) {
-      final positions = _itemPositions.itemPositions.value;
-      if (positions.isNotEmpty) {
-        final visible = positions
-            .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
-            .toList(growable: false);
-        if (visible.isNotEmpty) {
-          visible.sort((a, b) =>
-              a.itemLeadingEdge.compareTo(b.itemLeadingEdge));
-          final top = visible.first;
-          // Only anchor if user is not already at the very top.
-          final topPostIndex = _showTopLoader ? top.index - 1 : top.index;
-          if (topPostIndex > 0) {
-            anchor = _ScrollAnchor(
-              index: topPostIndex,
-              leadingEdge: top.itemLeadingEdge,
-            );
-          }
-        }
-      }
+    double? anchorPixel;
+    if (direction == _LoadDirection.prepend && _scrollController.hasClients) {
+      anchorPixel = _scrollController.position.pixels;
     }
 
     setState(() {
@@ -718,20 +770,20 @@ final class _ThreadPageState extends State<ThreadPage> {
         );
       }
 
-      // Restore scroll position after prepend.
-      if (direction == _LoadDirection.prepend && anchor != null && adjustScroll) {
+      // Restore scroll position after prepend (content shifts down).
+      if (direction == _LoadDirection.prepend && anchorPixel != null && adjustScroll) {
         final insertedCount = thread.replies.length;
-        final newPostIndex = anchor.index + insertedCount;
-        final newItemIndex = _itemIndexForPostIndex(newPostIndex);
-        final targetAlignment = anchor.leadingEdge;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
-          if (!_itemScroll.isAttached) return;
-          if (newItemIndex >= _posts.length + (_showTopLoader ? 1 : 0)) return;
-          _itemScroll.jumpTo(
-            index: newItemIndex,
-            alignment: targetAlignment,
-          );
+          if (!_scrollController.hasClients) return;
+          // Approximate: shift the scroll offset by the estimated height of
+          // the inserted items so the viewport appears to stay in place.
+          final viewportHeight = _scrollController.position.viewportDimension;
+          final avgItemHeight = _posts.isEmpty
+              ? 100.0
+              : viewportHeight / (_posts.length / (insertedCount + 1));
+          final estimatedInsertedHeight = insertedCount * avgItemHeight;
+          _scrollController.jumpTo(anchorPixel! + estimatedInsertedHeight);
         });
       }
 
@@ -839,69 +891,18 @@ final class _ThreadPageState extends State<ThreadPage> {
     }
     perf.check('forwardLoaded', fields: {'posts': _posts.length, 'hasMore': _hasMore});
 
-    // Capture anchor before backward loads for a single restore.
-    // For reply-jumps we skip restoration because the scrollTo animation
-    // races with prepend setState storms; the jump handler positions the
-    // list instead. For normal cursor restores we must restore so prepend
-    // insertions don't shift the viewport away from the target post.
-    final isReplyJump = widget.flashPostId != null;
-    final shouldRestoreScroll =
-        !_hideContentUntilJump && !isReplyJump;
-    _ScrollAnchor? anchor;
-    if (shouldRestoreScroll && _itemScroll.isAttached) {
-      final positions = _itemPositions.itemPositions.value;
-      if (positions.isNotEmpty) {
-        final visible = positions
-            .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
-            .toList(growable: false);
-        if (visible.isNotEmpty) {
-          visible.sort((a, b) =>
-              a.itemLeadingEdge.compareTo(b.itemLeadingEdge));
-          final top = visible.first;
-          // Record the _posts index (not the raw item index) so we can
-          // correctly compute the new item index after prepends.
-          final topPostIndex = _showTopLoader ? top.index - 1 : top.index;
-          anchor = _ScrollAnchor(
-            index: topPostIndex,
-            leadingEdge: top.itemLeadingEdge,
-          );
-        }
-      }
-    }
-
     // For reply-jumps (e.g. from post history), skip backward loads.
-    // When all surrounding pages hit cache, the prepend setState storms
-    // race with the scrollTo animation and shift item indices before the
-    // scroll can complete, causing the list to land at the wrong post.
     // Backward pages will be loaded on-demand via auto-load when the user
     // scrolls up.
+    final isReplyJump = widget.flashPostId != null;
     if (!isReplyJump) {
-      var totalInserted = 0;
       for (var p = centerPage - 1; p >= centerPage - 2; p--) {
         if (p < 1) break;
-        final beforeLen = _posts.length;
         await _loadPage(p,
             direction: _LoadDirection.prepend, adjustScroll: false);
         if (!mounted) return;
-        totalInserted += _posts.length - beforeLen;
       }
-      perf.check('backwardLoaded', fields: {'totalInserted': totalInserted, 'posts': _posts.length});
-
-      // Restore scroll position once after all backward loads.
-      if (anchor != null && totalInserted > 0) {
-        final newPostIndex = anchor.index + totalInserted;
-        final newItemIndex = _itemIndexForPostIndex(newPostIndex);
-        final targetAlignment = anchor.leadingEdge;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          if (!_itemScroll.isAttached) return;
-          if (newItemIndex >= _posts.length + (_showTopLoader ? 1 : 0)) return;
-          _itemScroll.jumpTo(
-            index: newItemIndex,
-            alignment: targetAlignment,
-          );
-        });
-      }
+      perf.check('backwardLoaded', fields: {'posts': _posts.length});
     }
 
     // If the jump target was not found in the center page, try once more
@@ -1048,76 +1049,44 @@ final class _ThreadPageState extends State<ThreadPage> {
     if (page != null) {
       if (page == -1) {
         // Jump to last page based on replyCount/maxPage.
-        // XDNMB thread pages: each page contains up to 19 replies.
-        // (This is provided by xdnmb_api's Thread.maxPage.)
         if (_posts.isNotEmpty) {
           final last = _posts.first.maxPage;
           if (last != null) {
             await _loadPage(last,
                 direction: _LoadDirection.refresh, forceRefresh: true);
-            // After loading last page, scroll to bottom.
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (!_itemScroll.isAttached) return;
-              if (_posts.isEmpty) return;
-              final lastPostIndex = _posts.length - 1;
-              final lastItemIndex = _itemIndexForPostIndex(lastPostIndex);
-              _itemScroll.scrollTo(
-                index: lastItemIndex,
-                alignment: 1,
-                duration: const Duration(milliseconds: 400),
-                curve: Curves.easeOutCubic,
-              );
+              if (!_scrollController.hasClients) return;
+              _scrollController.jumpTo(
+                  _scrollController.position.maxScrollExtent);
             });
           } else {
-            // If maxPage is not available, load the current page and scroll to bottom
             await _loadPage(_page);
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (!_itemScroll.isAttached) return;
-              if (_posts.isEmpty) return;
-              final lastPostIndex = _posts.length - 1;
-              final lastItemIndex = _itemIndexForPostIndex(lastPostIndex);
-              _itemScroll.scrollTo(
-                index: lastItemIndex,
-                alignment: 1,
-                duration: const Duration(milliseconds: 400),
-                curve: Curves.easeOutCubic,
-              );
+              if (!_scrollController.hasClients) return;
+              _scrollController.jumpTo(
+                  _scrollController.position.maxScrollExtent);
             });
           }
         } else {
-          // If no posts are loaded, load first page
           await _loadPage(1);
         }
       } else {
-        // Clear existing posts before loading new page
         setState(() {
           _posts.clear();
           _hasMore = true;
           _loadedMinReplyPage = null;
           _loadedMaxReplyPage = null;
-          // Clear jump target to prevent scrolling to saved position
           _jumpTargetPostId = null;
         });
         await _loadPage(page,
             direction: _LoadDirection.refresh, forceRefresh: true);
-        // Ensure scroll to top (mainPost) after loading.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
-          if (!_itemScroll.isAttached) return;
-          // Scroll to mainPost (index 0 in _posts → item index accounts for
-          // the optional top loader).
-          final mainPostItemIndex = _itemIndexForPostIndex(0);
-          _itemScroll.scrollTo(
-            index: mainPostItemIndex,
-            alignment: 0,
-            duration: const Duration(milliseconds: 350),
-            curve: Curves.easeOutCubic,
-          );
+          if (!_scrollController.hasClients) return;
+          _scrollController.jumpTo(0);
         });
-        // Proactively load surrounding pages for a seamless scroll experience.
-        // ignore: discarded_futures
         _loadSurroundingPages(page);
       }
     }
@@ -1180,11 +1149,12 @@ final class _ThreadPageState extends State<ThreadPage> {
   }
 
   void _scrollToMatch(int matchIndex) {
-    if (!_itemScroll.isAttached) return;
     final postIndex = _searchMatches[matchIndex];
-    final itemIndex = _itemIndexForPostIndex(postIndex);
-    _itemScroll.scrollTo(
-      index: itemIndex,
+    if (postIndex >= _postKeys.length) return;
+    final context = _postKeys[postIndex].currentContext;
+    if (context == null) return;
+    Scrollable.ensureVisible(
+      context,
       alignment: 0.15,
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOutCubic,
@@ -1267,10 +1237,9 @@ final class _ThreadPageState extends State<ThreadPage> {
                     await _loadPage(1,
                         direction: _LoadDirection.refresh,
                         forceRefresh: true);
-                    if (_itemScroll.isAttached) {
-                      _itemScroll.scrollTo(
-                        index: 0,
-                        alignment: 0,
+                    if (_scrollController.hasClients) {
+                      _scrollController.animateTo(
+                        0,
                         duration: const Duration(milliseconds: 300),
                         curve: Curves.easeOut,
                       );
@@ -1318,10 +1287,9 @@ final class _ThreadPageState extends State<ThreadPage> {
                     await _loadPage(1,
                         direction: _LoadDirection.refresh, forceRefresh: true);
                     _repoRef?.startThreadSession(widget.mainPostId, _onlyPo);
-                    if (_itemScroll.isAttached) {
-                      _itemScroll.scrollTo(
-                        index: 0,
-                        alignment: 0,
+                    if (_scrollController.hasClients) {
+                      _scrollController.animateTo(
+                        0,
                         duration: const Duration(milliseconds: 300),
                         curve: Curves.easeOut,
                       );
@@ -1376,10 +1344,9 @@ final class _ThreadPageState extends State<ThreadPage> {
                 FloatingActionButton.small(
                   heroTag: 'backToTop',
                   onPressed: () {
-                    if (!_itemScroll.isAttached) return;
-                    _itemScroll.scrollTo(
-                      index: 0,
-                      alignment: 0,
+                    if (!_scrollController.hasClients) return;
+                    _scrollController.animateTo(
+                      0,
                       duration: const Duration(milliseconds: 300),
                       curve: Curves.easeOut,
                     );
@@ -1459,41 +1426,60 @@ final class _ThreadPageState extends State<ThreadPage> {
                                       }
                                       return false;
                                     },
-                                    child: ScrollablePositionedList.separated(
-                                      itemScrollController: _itemScroll,
-                                      itemPositionsListener: _itemPositions,
-                                      itemCount: _posts.length +
-                                          1 +
-                                          (_showTopLoader ? 1 : 0),
-                                      separatorBuilder: (context, index) =>
-                                          const Divider(height: 1),
-                                      itemBuilder: (context, index) {
-                                        // Top loader inserted before mainPost.
-                                        if (_showTopLoader && index == 0) {
-                                          return _buildTopLoader(context);
-                                        }
-                                        final adjustedIndex =
-                                            _showTopLoader ? index - 1 : index;
-                                        if (adjustedIndex == _posts.length) {
-                                          return _buildListFooter(context);
-                                        }
-                                        final p = _posts[adjustedIndex];
-                                        return AnimatedListItem(
-                                          index: adjustedIndex,
-                                          child: ThreadPostItem(
-                                            post: p,
-                                            index: adjustedIndex,
-                                            poUserHash: _poUserHash,
-                                            flashPostId: _flashingPostId,
-                                            flashPhase: _flashPhase,
-                                            onReply: () => _replyToPost(p.id),
-                                            isSearchMatch: _searchMatches
-                                                .contains(adjustedIndex),
-                                            inThreadPostIds: _inThreadPostIds,
-                                            onRefInThread: _onRefInThread,
-                                          ),
-                                        );
-                                      },
+                                    child: SmoothWheelInterceptor(
+                                      controller: _scrollController,
+                                      child: Scrollbar(
+                                        controller: _scrollController,
+                                        child: ListView.builder(
+                                          controller: _scrollController,
+                                          itemCount: _posts.length +
+                                              1 +
+                                              (_showTopLoader ? 1 : 0),
+                                          itemBuilder: (context, index) {
+                                            // Top loader inserted before mainPost.
+                                            if (_showTopLoader && index == 0) {
+                                              return Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  _buildTopLoader(context),
+                                                  const Divider(height: 1),
+                                                ],
+                                              );
+                                            }
+                                            final adjustedIndex =
+                                                _showTopLoader ? index - 1 : index;
+                                            if (adjustedIndex == _posts.length) {
+                                              return _buildListFooter(context);
+                                            }
+                                            final p = _posts[adjustedIndex];
+                                            while (_postKeys.length <= adjustedIndex) {
+                                              _postKeys.add(GlobalKey());
+                                            }
+                                            return Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                AnimatedListItem(
+                                                  index: adjustedIndex,
+                                                  child: ThreadPostItem(
+                                                    key: _postKeys[adjustedIndex],
+                                                    post: p,
+                                                    index: adjustedIndex,
+                                                    poUserHash: _poUserHash,
+                                                    flashPostId: _flashingPostId,
+                                                    flashPhase: _flashPhase,
+                                                    onReply: () => _replyToPost(p.id),
+                                                    isSearchMatch: _searchMatches
+                                                        .contains(adjustedIndex),
+                                                    inThreadPostIds: _inThreadPostIds,
+                                                    onRefInThread: _onRefInThread,
+                                                  ),
+                                                ),
+                                                const Divider(height: 1),
+                                              ],
+                                            );
+                                          },
+                                        ),
+                                      ),
                                     ),
                                   ),
                     // 无缝跳转遮罩层
@@ -1555,14 +1541,9 @@ final class _ThreadPageState extends State<ThreadPage> {
                             forceRefresh: true);
                         WidgetsBinding.instance.addPostFrameCallback((_) {
                           if (!mounted) return;
-                          if (!_itemScroll.isAttached) return;
-                          if (_posts.isEmpty) return;
-                          final lastPostIndex = _posts.length - 1;
-                          final lastItemIndex =
-                              _itemIndexForPostIndex(lastPostIndex);
-                          _itemScroll.scrollTo(
-                            index: lastItemIndex,
-                            alignment: 1,
+                          if (!_scrollController.hasClients) return;
+                          _scrollController.animateTo(
+                            _scrollController.position.maxScrollExtent,
                             duration: const Duration(milliseconds: 400),
                             curve: Curves.easeOutCubic,
                           );
@@ -1571,10 +1552,9 @@ final class _ThreadPageState extends State<ThreadPage> {
                         await _loadPage(1,
                             direction: _LoadDirection.refresh,
                             forceRefresh: true);
-                        if (_itemScroll.isAttached) {
-                          _itemScroll.scrollTo(
-                            index: 0,
-                            alignment: 0,
+                        if (_scrollController.hasClients) {
+                          _scrollController.animateTo(
+                            0,
                             duration: const Duration(milliseconds: 300),
                             curve: Curves.easeOut,
                           );

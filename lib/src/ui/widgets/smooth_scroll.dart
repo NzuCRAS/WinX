@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 /// A [ScrollPosition] that replaces instantaneous wheel scrolls with
 /// smooth animations.
@@ -118,20 +117,25 @@ class SmoothScrollController extends ScrollController {
   }
 }
 
-/// Wrapper that intercepts pointer-scroll events for a
-/// [ScrollablePositionedList] whose [physics] is set to
-/// [NeverScrollableScrollPhysics].
+/// Wrapper that intercepts pointer-scroll events for a scrollable widget
+/// (e.g. [ListView]) and replaces the native snap-to-target behaviour with
+/// a short ease-out animation.
 ///
-/// Because the list itself ignores wheel input, this widget feeds smooth
-/// animated scrolls via [ScrollOffsetController] instead.
+/// The [controller] should be the same [ScrollController] attached to the
+/// inner scrollable (e.g. a [SmoothScrollController]).
 class SmoothWheelInterceptor extends StatefulWidget {
   final Widget child;
-  final ScrollOffsetController controller;
+  final ScrollController controller;
+
+  /// Multiplier applied to the raw wheel delta.
+  /// Increase this if a single wheel notch scrolls too little.
+  final double scrollScale;
 
   const SmoothWheelInterceptor({
     super.key,
     required this.child,
     required this.controller,
+    this.scrollScale = 2.5,
   });
 
   @override
@@ -147,16 +151,32 @@ class _SmoothWheelInterceptorState extends State<SmoothWheelInterceptor> {
       _debounce?.cancel();
       _pendingDelta += event.scrollDelta.dy;
 
-      // Batch rapid wheel events into a single animated scroll.
-      _debounce = Timer(const Duration(milliseconds: 16), () {
+      // Flush at the end of the current frame so multiple wheel events
+      // that arrive in the same frame are coalesced, but the user never
+      // feels a delay.
+      _debounce = Timer(Duration.zero, () {
         if (!mounted) return;
 
-        final delta = _pendingDelta;
+        final delta = _pendingDelta * widget.scrollScale;
         _pendingDelta = 0;
+        if (delta == 0) return;
 
-        final ms = (delta.abs() * 1.2).clamp(50, 250).round();
-        widget.controller.animateScroll(
-          offset: delta,
+        final controller = widget.controller;
+        if (!controller.hasClients) return;
+
+        final position = controller.position;
+        final target = (position.pixels + delta).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        );
+        final distance = (target - position.pixels).abs();
+
+        // Always animate — even small movements get a short ease-out so
+        // the scroll feels fluid rather than snapping.  The duration scales
+        // with distance but is capped so large scrolls don't feel sluggish.
+        final ms = (distance * 0.4).clamp(60, 220).round();
+        controller.animateTo(
+          target,
           duration: Duration(milliseconds: ms),
           curve: Curves.easeOutCubic,
         );

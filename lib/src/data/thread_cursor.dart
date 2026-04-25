@@ -21,15 +21,22 @@ sealed class ThreadCursor {
 final class ThreadMainCursor extends ThreadCursor {
   final int threadId; // mainPostId
   final int anchorPostId;
+  /// Deprecated: no longer used for restore because [_posts] array shape
+  /// changes when surrounding pages are loaded. Kept for backward compat.
   final int? topIndexHint;
   /// 1-based page where the anchor post lives. Helps deep-jump without probing.
   final int? page;
+  /// The saved alignment of [anchorPostId] within the viewport (0 = top,
+  /// 1 = bottom). When restoring we scroll to this alignment so the user
+  /// sees the exact same viewport slice they last saw.
+  final double? alignment;
 
   const ThreadMainCursor({
     required this.threadId,
     required this.anchorPostId,
     this.topIndexHint,
     this.page,
+    this.alignment,
   });
 
   @override
@@ -39,6 +46,7 @@ final class ThreadMainCursor extends ThreadCursor {
         'anchorPostId': anchorPostId,
         'topIndexHint': topIndexHint,
         'page': page,
+        'alignment': alignment,
       };
 
   static ThreadMainCursor? tryParseJsonString(String raw) {
@@ -50,12 +58,14 @@ final class ThreadMainCursor extends ThreadCursor {
       final anchorPostId = int.tryParse(m['anchorPostId']?.toString() ?? '');
       final topIndexHint = int.tryParse(m['topIndexHint']?.toString() ?? '');
       final page = int.tryParse(m['page']?.toString() ?? '');
+      final alignment = double.tryParse(m['alignment']?.toString() ?? '');
       if (threadId == null || anchorPostId == null) return null;
       return ThreadMainCursor(
         threadId: threadId,
         anchorPostId: anchorPostId,
         topIndexHint: topIndexHint,
         page: page,
+        alignment: alignment,
       );
     } catch (_) {
       return null;
