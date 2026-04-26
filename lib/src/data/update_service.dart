@@ -46,11 +46,14 @@ final class UpdateService extends ChangeNotifier {
   String? get statusMessage => _statusMessage;
   double get downloadProgress => _downloadProgress;
 
-  /// Asset filename pattern: `WinX-1.2.3-windows-x64.zip` or
-  /// `WinX-1.2.3-rc.1-windows-x64.zip`. Excludes symbols/debug variants.
+  /// Asset filename pattern. Accepts:
+  ///   - 2- or 3-segment versions (`1.3`, `1.3.0`)
+  ///   - optional `v` prefix on the version
+  ///   - optional pre-release suffix (`-rc.1`, `-beta`)
+  /// Excludes symbols/debug variants via [assetBlacklistRegex].
   @visibleForTesting
   static final RegExp assetRegex = RegExp(
-    r'^WinX-\d+\.\d+\.\d+(?:-[\w.]+)?-windows-x64\.zip$',
+    r'^WinX-v?\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?-windows-x64\.zip$',
   );
 
   /// Keywords that disqualify a release asset even if it matches [assetRegex].
@@ -114,15 +117,20 @@ final class UpdateService extends ChangeNotifier {
 
       // Find the Windows zip asset. Prefer exact-version filename; fall back
       // to a regex match that excludes symbol/debug variants.
+      // Some releases keep the `v` prefix in the asset name (e.g.
+      // `WinX-v1.3-windows-x64.zip`), some don't. Try both.
       final assets = body['assets'] as List<dynamic>? ?? [];
       final tagNoV = tag.startsWith('v') ? tag.substring(1) : tag;
-      final preferredName = 'WinX-$tagNoV-windows-x64.zip';
+      final preferredNames = <String>{
+        'WinX-$tag-windows-x64.zip',
+        'WinX-$tagNoV-windows-x64.zip',
+      };
       String? downloadUrl;
       int? assetSize;
 
       for (final a in assets) {
         final name = (a as Map<String, dynamic>)['name'] as String? ?? '';
-        if (name == preferredName) {
+        if (preferredNames.contains(name)) {
           downloadUrl = a['browser_download_url'] as String?;
           assetSize = a['size'] as int?;
           break;
@@ -282,6 +290,8 @@ final class UpdateService extends ChangeNotifier {
       await Directory(updateRoot).create(recursive: true);
 
       final scriptPath = p.join(updateRoot, '_update.ps1');
+      final batPath = p.join(updateRoot, '_run_updater.bat');
+      final logPath = p.join(updateRoot, '_update.log');
       final expectedSize = await File(zipPath).length();
       final script = _buildUpdaterScript(
         zipPath: zipPath,
@@ -292,22 +302,41 @@ final class UpdateService extends ChangeNotifier {
       );
       await File(scriptPath).writeAsString(script, encoding: utf8);
 
-      // Launch PowerShell with the updater script.
-      // -WindowStyle Hidden avoids flashing a console.
+      // Trampoline batch: cmd's `start /b` does a real BREAKAWAY_FROM_JOB so
+      // the PS process keeps running after Dart exits, even if the Dart
+      // parent was inside a Job Object (which Dart's detached mode does not
+      // by itself escape from).
+      await File(batPath).writeAsString(
+        '@echo off\r\n'
+        'echo %DATE% %TIME% [bat] launching ps>> "$logPath"\r\n'
+        'start "" /b powershell.exe -NoProfile -ExecutionPolicy Bypass '
+        '-WindowStyle Hidden -File "$scriptPath"\r\n',
+        encoding: utf8,
+      );
+
+      // Diagnostic breadcrumb so we can tell whether the PS script ever ran:
+      // - only [dart] line   → cmd never ran the bat
+      // - [dart] + [bat]     → bat ran but PS process didn't survive
+      // - [dart] + [bat] + [ps] script entry  → PS started, look for FATAL
+      final stamp = DateTime.now().toIso8601String();
+      await File(logPath).writeAsString(
+        '$stamp [dart] installer prepared. '
+        'script=$scriptPath zip=$zipPath appDir=$appDir size=$expectedSize\n',
+        mode: FileMode.append,
+        encoding: utf8,
+      );
+
       await Process.start(
-        'powershell.exe',
-        [
-          '-ExecutionPolicy',
-          'Bypass',
-          '-WindowStyle',
-          'Hidden',
-          '-File',
-          scriptPath,
-        ],
+        'cmd.exe',
+        ['/c', batPath],
         mode: ProcessStartMode.detached,
       );
 
       PerfLog.log('update.installer launched script=$scriptPath zip=$zipPath');
+
+      // Give the OS a moment to spawn cmd → bat → start → powershell. Without
+      // this delay we sometimes exit before `start` has detached the PS child.
+      await Future<void>.delayed(const Duration(milliseconds: 800));
 
       // Exit the app so the updater can overwrite files.
       exit(0);
@@ -343,7 +372,15 @@ final class UpdateService extends ChangeNotifier {
 \$backupDir  = Join-Path \$updateRoot 'backup'
 
 function Write-Log(\$msg) {
-    "\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') \$msg" | Out-File -Append -FilePath \$logPath -Encoding utf8
+    try {
+        if (-not (Test-Path \$updateRoot)) {
+            New-Item -ItemType Directory -Path \$updateRoot -Force | Out-Null
+        }
+        "\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ps] \$msg" | Out-File -Append -FilePath \$logPath -Encoding utf8
+    } catch {
+        \$emergency = Join-Path \$env:TEMP 'winx_updater_emergency.log'
+        "\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ps-fallback] \$msg | logwrite-fail: \$_" | Out-File -Append -FilePath \$emergency -Encoding utf8
+    }
 }
 
 function Restore-Backup() {
@@ -357,6 +394,18 @@ function Restore-Backup() {
         }
     }
 }
+
+# Trap any uncaught error — make sure something is recorded.
+trap {
+    Write-Log "FATAL: \$(\$_.Exception.Message)"
+    Write-Log "STACK: \$(\$_.ScriptStackTrace)"
+    exit 99
+}
+
+# Earliest possible breadcrumb. If the log shows [dart] but no [ps] line,
+# PowerShell never started; if it shows this line but nothing after,
+# something blew up between here and the next Write-Log.
+Write-Log "script entry pid=\$PID host=\$(\$Host.Name) psver=\$(\$PSVersionTable.PSVersion)"
 
 # Ensure workspace and reset transient dirs.
 New-Item -ItemType Directory -Path \$updateRoot -Force | Out-Null
@@ -466,10 +515,12 @@ Remove-Item -Path \$zipPath    -Force -ErrorAction SilentlyContinue
 Remove-Item -Path \$extractDir -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path \$backupDir  -Recurse -Force -ErrorAction SilentlyContinue
 
-# Schedule self-deletion of this script (we can't delete the file we are running).
+# Schedule self-deletion of script + trampoline bat (we can't delete the
+# file we are running ourselves).
 \$selfPath = \$MyInvocation.MyCommand.Path
+\$batPath  = Join-Path \$updateRoot '_run_updater.bat'
 if (\$selfPath) {
-    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c timeout /t 3 >nul && del ""\$selfPath""" -WindowStyle Hidden
+    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c timeout /t 3 >nul && del ""\$selfPath"" && del ""\$batPath""" -WindowStyle Hidden
 }
 
 Write-Log "Updater finished."

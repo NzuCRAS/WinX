@@ -87,6 +87,18 @@ void main() {
       expect(match('WinX-12.345.6789-windows-x64.zip'), isTrue);
     });
 
+    test('accepts asset names with v prefix', () {
+      // Real-world: NzuCRAS/WinX uses "WinX-v1.3-windows-x64.zip".
+      expect(match('WinX-v1.3-windows-x64.zip'), isTrue);
+      expect(match('WinX-v1.3.0-windows-x64.zip'), isTrue);
+      expect(match('WinX-v2.0.0-windows-x64.zip'), isTrue);
+    });
+
+    test('accepts 2-segment version', () {
+      expect(match('WinX-1.3-windows-x64.zip'), isTrue);
+      expect(match('WinX-v1.3-windows-x64.zip'), isTrue);
+    });
+
     test('matches pre-release suffix', () {
       expect(match('WinX-1.0.0-rc.1-windows-x64.zip'), isTrue);
       expect(match('WinX-1.0.0-beta-windows-x64.zip'), isTrue);
@@ -124,8 +136,8 @@ void main() {
       expect(match('WinX-1.0.0-windows-x64'), isFalse);
     });
 
-    test('rejects 2-segment or 4-segment version', () {
-      expect(match('WinX-1.0-windows-x64.zip'), isFalse);
+    test('rejects 1-segment or 4-segment version', () {
+      expect(match('WinX-1-windows-x64.zip'), isFalse);
       expect(match('WinX-1.0.0.0-windows-x64.zip'), isFalse);
     });
 
