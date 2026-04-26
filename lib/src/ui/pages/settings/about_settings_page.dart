@@ -21,6 +21,23 @@ final class _AboutSettingsPageState extends State<AboutSettingsPage> {
   UpdateInfo? _pendingUpdate;
 
   @override
+  void initState() {
+    super.initState();
+    _updateService.addListener(_onUpdateChanged);
+  }
+
+  @override
+  void dispose() {
+    _updateService.removeListener(_onUpdateChanged);
+    _updateService.dispose();
+    super.dispose();
+  }
+
+  void _onUpdateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
     final settings = context.watch<SettingsController>();
 

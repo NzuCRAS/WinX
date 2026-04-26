@@ -10,6 +10,7 @@ import 'package:window_manager/window_manager.dart';
 import 'src/app/app_state.dart';
 import 'src/app/cookie_controller.dart';
 import 'src/app/settings_controller.dart';
+import 'src/data/app_version.dart';
 import 'src/data/local_prefs.dart';
 import 'src/ui/app_navigator.dart';
 import 'src/ui/pages/home_page.dart';
@@ -25,6 +26,7 @@ void main(List<String> args) async {
   }
 
   await windowManager.ensureInitialized();
+  await initAppVersion();
 
   // Sub-window entry: args = ['multi_window', windowId, jsonArguments]
   if (args.isNotEmpty && args.first == 'multi_window') {

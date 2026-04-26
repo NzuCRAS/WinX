@@ -112,7 +112,12 @@ final class _HomePageState extends State<HomePage> {
     }
 
     final service = UpdateService();
-    final info = await service.checkForUpdate();
+    final UpdateInfo? info;
+    try {
+      info = await service.checkForUpdate();
+    } finally {
+      service.dispose();
+    }
     if (!mounted) return;
 
     await settings.setLastUpdateCheckAt(now);

@@ -604,9 +604,9 @@ String _normalizePostText(String input) {
   s = s.replaceAll('\r\n', '').replaceAll('\r', '');
 
   // Basic HTML -> plain text.
-  // Match <br> together with trailing whitespace (including the \n that
-  // often follows it in HTML source) so each <br> produces exactly one \n.
-  s = s.replaceAll(RegExp(r'<\s*br\s*\/?>\s*', caseSensitive: false), '\n');
+  // Match <br> together with a single trailing \n (HTML source formatting)
+  // so each <br> produces exactly one \n, but leave spaces untouched.
+  s = s.replaceAll(RegExp(r'<\s*br\s*\/?>\n?', caseSensitive: false), '\n');
   s = s.replaceAll(RegExp(r'<\s*\/p\s*>', caseSensitive: false), '\n');
   s = s.replaceAll(RegExp(r'<\s*p\s*>', caseSensitive: false), '');
 

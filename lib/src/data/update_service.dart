@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -35,17 +35,42 @@ enum UpdateStatus { idle, checking, downloading, installing, error }
 ///
 /// On Windows we cannot overwrite the running EXE, so the actual replacement
 /// is delegated to a PowerShell updater script that runs after the app exits.
-final class UpdateService {
-  UpdateStatus status = UpdateStatus.idle;
-  String? statusMessage;
-  double downloadProgress = 0.0;
+///
+/// Extends [ChangeNotifier] so the UI can react to status / progress changes.
+final class UpdateService extends ChangeNotifier {
+  UpdateStatus _status = UpdateStatus.idle;
+  String? _statusMessage;
+  double _downloadProgress = 0.0;
 
-  static const String _kAssetPattern = 'WinX-';
-  static const String _kAssetSuffix = '-windows-x64.zip';
+  UpdateStatus get status => _status;
+  String? get statusMessage => _statusMessage;
+  double get downloadProgress => _downloadProgress;
+
+  /// Asset filename pattern: `WinX-1.2.3-windows-x64.zip` or
+  /// `WinX-1.2.3-rc.1-windows-x64.zip`. Excludes symbols/debug variants.
+  @visibleForTesting
+  static final RegExp assetRegex = RegExp(
+    r'^WinX-\d+\.\d+\.\d+(?:-[\w.]+)?-windows-x64\.zip$',
+  );
+
+  /// Keywords that disqualify a release asset even if it matches [assetRegex].
+  /// `WinX-1.0.0-symbols-windows-x64.zip` would otherwise be mis-read as a
+  /// `-symbols` pre-release.
+  @visibleForTesting
+  static final RegExp assetBlacklistRegex = RegExp(
+    r'-(?:symbols|symbol|debug|dbg|pdb)\b',
+    caseSensitive: false,
+  );
+
+  /// Returns true iff [name] looks like the release zip we want.
+  @visibleForTesting
+  static bool isReleaseAsset(String name) =>
+      assetRegex.hasMatch(name) && !assetBlacklistRegex.hasMatch(name);
 
   void _setStatus(UpdateStatus s, {String? message}) {
-    status = s;
-    statusMessage = message;
+    _status = s;
+    _statusMessage = message;
+    notifyListeners();
   }
 
   /// Check GitHub releases for a newer version.
@@ -53,7 +78,7 @@ final class UpdateService {
   /// Returns [UpdateInfo] if a newer version exists, null otherwise.
   /// Also returns null on network errors (caller should handle gracefully).
   Future<UpdateInfo?> checkForUpdate() async {
-    if (status == UpdateStatus.checking) return null;
+    if (_status == UpdateStatus.checking) return null;
     _setStatus(UpdateStatus.checking);
 
     try {
@@ -75,22 +100,42 @@ final class UpdateService {
       final tag = body['tag_name'] as String? ?? '';
       final bodyText = body['body'] as String? ?? '';
       final htmlUrl = body['html_url'] as String? ?? '';
+      final isPrerelease = body['prerelease'] as bool? ?? false;
 
-      if (!_isNewer(tag, appVersionDisplay)) {
+      if (isPrerelease) {
         _setStatus(UpdateStatus.idle, message: '已是最新版本');
         return null;
       }
 
-      // Find the Windows zip asset.
+      if (!isNewerVersion(tag, appVersionDisplay)) {
+        _setStatus(UpdateStatus.idle, message: '已是最新版本');
+        return null;
+      }
+
+      // Find the Windows zip asset. Prefer exact-version filename; fall back
+      // to a regex match that excludes symbol/debug variants.
       final assets = body['assets'] as List<dynamic>? ?? [];
+      final tagNoV = tag.startsWith('v') ? tag.substring(1) : tag;
+      final preferredName = 'WinX-$tagNoV-windows-x64.zip';
       String? downloadUrl;
       int? assetSize;
+
       for (final a in assets) {
         final name = (a as Map<String, dynamic>)['name'] as String? ?? '';
-        if (name.startsWith(_kAssetPattern) && name.endsWith(_kAssetSuffix)) {
+        if (name == preferredName) {
           downloadUrl = a['browser_download_url'] as String?;
           assetSize = a['size'] as int?;
           break;
+        }
+      }
+      if (downloadUrl == null) {
+        for (final a in assets) {
+          final name = (a as Map<String, dynamic>)['name'] as String? ?? '';
+          if (isReleaseAsset(name)) {
+            downloadUrl = a['browser_download_url'] as String?;
+            assetSize = a['size'] as int?;
+            break;
+          }
         }
       }
 
@@ -122,10 +167,16 @@ final class UpdateService {
 
   /// Compare two version strings.
   ///
-  /// Supports tags like "v1.0.0" or "1.0.0".
+  /// Supports tags like "v1.0.0" or "1.0.0". Pre-release suffixes (e.g.
+  /// "-rc.1") are stripped before comparison.
   /// Returns true if [remote] is newer than [local].
-  static bool _isNewer(String remote, String local) {
-    String strip(String s) => s.replaceFirst(RegExp(r'^v'), '');
+  @visibleForTesting
+  static bool isNewerVersion(String remote, String local) {
+    String strip(String s) {
+      final stripped = s.replaceFirst(RegExp(r'^v'), '');
+      final dash = stripped.indexOf('-');
+      return dash >= 0 ? stripped.substring(0, dash) : stripped;
+    }
     final rParts = strip(remote).split('.').map(int.tryParse).toList();
     final lParts = strip(local).split('.').map(int.tryParse).toList();
 
@@ -142,9 +193,9 @@ final class UpdateService {
   ///
   /// Returns the path to the downloaded zip file.
   Future<String?> downloadUpdate(UpdateInfo info) async {
-    if (status == UpdateStatus.downloading) return null;
+    if (_status == UpdateStatus.downloading) return null;
+    _downloadProgress = 0.0;
     _setStatus(UpdateStatus.downloading);
-    downloadProgress = 0.0;
 
     try {
       final tmpDir = await getTemporaryDirectory();
@@ -163,16 +214,38 @@ final class UpdateService {
 
         final total = response.contentLength ?? 0;
         var received = 0;
+        var lastNotified = 0.0;
         final sink = File(zipPath).openWrite();
 
         await for (final chunk in response.stream) {
           sink.add(chunk);
           received += chunk.length;
           if (total > 0) {
-            downloadProgress = received / total;
+            _downloadProgress = received / total;
+            // Throttle UI notifications to ~every 0.5% to avoid burning frames.
+            if (_downloadProgress - lastNotified >= 0.005 ||
+                _downloadProgress >= 1.0) {
+              lastNotified = _downloadProgress;
+              notifyListeners();
+            }
           }
         }
         await sink.close();
+
+        // Sanity check: verify the downloaded size matches what GitHub
+        // advertised. Mismatches indicate a truncated download.
+        if (info.size > 0) {
+          final actual = await File(zipPath).length();
+          if (actual != info.size) {
+            _setStatus(UpdateStatus.error,
+                message: '下载文件大小异常 (期望 ${info.size}，实际 $actual)');
+            try {
+              await File(zipPath).delete();
+            } catch (_) {}
+            return null;
+          }
+        }
+
         _setStatus(UpdateStatus.idle);
         return zipPath;
       } finally {
@@ -186,39 +259,41 @@ final class UpdateService {
 
   /// Install the downloaded update.
   ///
-  /// Writes a PowerShell updater script next to the app EXE, then launches it
-  /// and exits the current app. The updater waits for the current process to
-  /// die, extracts the zip over the app directory, restarts the app, and then
-  /// cleans up.
+  /// Writes a PowerShell updater script under `%LOCALAPPDATA%\WinX\update\`,
+  /// then launches it and exits the current app. The updater waits for the
+  /// current process to exit, extracts the zip, applies it over the app
+  /// directory with a full backup, restarts the app, and cleans up. On any
+  /// extraction or copy failure the backup is restored.
   Future<void> installUpdate(String zipPath, String versionTag) async {
-    if (status == UpdateStatus.installing) return;
+    if (_status == UpdateStatus.installing) return;
     _setStatus(UpdateStatus.installing);
 
     try {
       final exePath = Platform.resolvedExecutable;
       final appDir = p.dirname(exePath);
       final exeName = p.basename(exePath);
-      final currentPid = ProcessInfo.currentRss; // Not actually PID, see below.
-      // Dart's ProcessInfo.currentRss gives memory usage, not PID.
-      // Use a different approach: get PID via Platform.
-      // Actually, Platform doesn't expose PID directly. We'll use a sentinel file.
 
-      // We'll use a simple sentinel approach: write a sentinel file, then
-      // the updater polls for its deletion (by the app) or just sleeps.
-      // Actually, a simpler approach: the updater sleeps for 2 seconds,
-      // then overwrites files. Since the app exits immediately after
-      // launching the updater, 2 seconds is plenty.
+      // Workspace under LOCALAPPDATA so we never need to write inside an
+      // installation directory like Program Files.
+      final localAppData = Platform.environment['LOCALAPPDATA'] ??
+          Platform.environment['USERPROFILE'] ??
+          appDir;
+      final updateRoot = p.join(localAppData, 'WinX', 'update');
+      await Directory(updateRoot).create(recursive: true);
 
-      final scriptPath = p.join(appDir, '_update.ps1');
+      final scriptPath = p.join(updateRoot, '_update.ps1');
+      final expectedSize = await File(zipPath).length();
       final script = _buildUpdaterScript(
         zipPath: zipPath,
         appDir: appDir,
         exeName: exeName,
+        updateRoot: updateRoot,
+        expectedSize: expectedSize,
       );
       await File(scriptPath).writeAsString(script, encoding: utf8);
 
       // Launch PowerShell with the updater script.
-      // Use -WindowStyle Hidden to avoid flashing a console.
+      // -WindowStyle Hidden avoids flashing a console.
       await Process.start(
         'powershell.exe',
         [
@@ -252,69 +327,151 @@ final class UpdateService {
     required String zipPath,
     required String appDir,
     required String exeName,
+    required String updateRoot,
+    required int expectedSize,
   }) {
-    // Backslash-escape the paths for PowerShell string literals.
-    final zip = zipPath.replaceAll("'", "''");
-    final dir = appDir.replaceAll("'", "''");
-    final exe = exeName.replaceAll("'", "''");
+    String esc(String s) => s.replaceAll("'", "''");
 
-    return '''\$zipPath = '$zip'
-\$appDir = '$dir'
-\$exeName = '$exe'
-\$logPath = Join-Path \$appDir '_update.log'
+    return '''\$zipPath      = '${esc(zipPath)}'
+\$appDir       = '${esc(appDir)}'
+\$exeName      = '${esc(exeName)}'
+\$updateRoot   = '${esc(updateRoot)}'
+\$expectedSize = $expectedSize
+
+\$logPath    = Join-Path \$updateRoot '_update.log'
+\$extractDir = Join-Path \$updateRoot 'extracted'
+\$backupDir  = Join-Path \$updateRoot 'backup'
 
 function Write-Log(\$msg) {
     "\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') \$msg" | Out-File -Append -FilePath \$logPath -Encoding utf8
 }
 
-Write-Log "Updater started. Waiting for app to exit..."
-
-# Wait for the main app to fully exit ( generous 3 seconds ).
-Start-Sleep -Seconds 3
-
-# Create a backup of the current EXE just in case.
-\$exePath = Join-Path \$appDir \$exeName
-\$backupPath = Join-Path \$appDir "\$exeName.backup"
-if (Test-Path \$exePath) {
-    Copy-Item -Path \$exePath -Destination \$backupPath -Force -ErrorAction SilentlyContinue
-    Write-Log "Backup created."
-}
-
-Write-Log "Extracting update..."
-# Expand the zip over the app directory. -Force overwrites existing files.
-try {
-    Expand-Archive -Path \$zipPath -DestinationPath \$appDir -Force
-    Write-Log "Extraction completed."
-} catch {
-    Write-Log "Extraction failed: \$_"
-    # If extraction fails, restore backup.
-    if (Test-Path \$backupPath) {
-        Copy-Item -Path \$backupPath -Destination \$exePath -Force
-        Write-Log "Backup restored."
+function Restore-Backup() {
+    if (-not (Test-Path \$backupDir)) { return }
+    Write-Log "Restoring from backup..."
+    Get-ChildItem -Path \$backupDir -Force | ForEach-Object {
+        try {
+            Copy-Item -Path \$_.FullName -Destination \$appDir -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Log "WARN: Failed to restore \$(\$_.Name): \$_"
+        }
     }
+}
+
+# Ensure workspace and reset transient dirs.
+New-Item -ItemType Directory -Path \$updateRoot -Force | Out-Null
+if (Test-Path \$extractDir) { Remove-Item -Path \$extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+if (Test-Path \$backupDir)  { Remove-Item -Path \$backupDir  -Recurse -Force -ErrorAction SilentlyContinue }
+
+Write-Log "Updater started. zip=\$zipPath appDir=\$appDir"
+
+# 1) Wait for the app process to exit (by base name, max 30s).
+\$baseExe = [System.IO.Path]::GetFileNameWithoutExtension(\$exeName)
+\$maxWait = 30.0
+\$elapsed = 0.0
+while (\$elapsed -lt \$maxWait) {
+    \$procs = Get-Process -Name \$baseExe -ErrorAction SilentlyContinue
+    if (-not \$procs) { break }
+    Start-Sleep -Milliseconds 500
+    \$elapsed += 0.5
+}
+if (\$elapsed -ge \$maxWait) {
+    Write-Log "WARN: process '\$baseExe' did not exit within \$maxWait s, proceeding anyway"
+}
+
+# 2) Verify zip size.
+if (\$expectedSize -gt 0) {
+    if (-not (Test-Path \$zipPath)) { Write-Log "ERROR: zip missing: \$zipPath"; exit 1 }
+    \$actualSize = (Get-Item \$zipPath).Length
+    if (\$actualSize -ne \$expectedSize) {
+        Write-Log "ERROR: zip size mismatch (expected=\$expectedSize actual=\$actualSize)"
+        exit 1
+    }
+}
+
+# 3) Extract to staging dir.
+Write-Log "Extracting to \$extractDir"
+try {
+    Expand-Archive -Path \$zipPath -DestinationPath \$extractDir -Force
+} catch {
+    Write-Log "ERROR: extract failed: \$_"
     exit 1
 }
 
-# Clean up backup.
-if (Test-Path \$backupPath) {
-    Remove-Item \$backupPath -Force -ErrorAction SilentlyContinue
+# 4) Flatten single top-level directory if present.
+\$topItems = @(Get-ChildItem -Path \$extractDir -Force)
+if (\$topItems.Count -eq 1 -and \$topItems[0].PSIsContainer) {
+    \$sub = \$topItems[0].FullName
+    Write-Log "Flattening single top-level directory: \$(\$topItems[0].Name)"
+    Get-ChildItem -Path \$sub -Force | ForEach-Object {
+        Move-Item -Path \$_.FullName -Destination \$extractDir -Force
+    }
+    Remove-Item -Path \$sub -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# Restart the app.
-\$newExe = Join-Path \$appDir \$exeName
-if (Test-Path \$newExe) {
-    Write-Log "Restarting app..."
-    Start-Process -FilePath \$newExe -WorkingDirectory \$appDir
-} else {
-    Write-Log "ERROR: New EXE not found at \$newExe"
+# 5) Verify EXE present in extracted payload.
+\$newExeStaging = Join-Path \$extractDir \$exeName
+if (-not (Test-Path \$newExeStaging)) {
+    Write-Log "ERROR: new EXE not found in payload: \$exeName"
     exit 1
 }
 
-# Clean up zip and script.
+# 6) Back up current install (excluding the updater workspace itself).
+Write-Log "Backing up current install..."
+New-Item -ItemType Directory -Path \$backupDir -Force | Out-Null
+try {
+    Get-ChildItem -Path \$appDir -Force | ForEach-Object {
+        if (\$_.Name -ne '_update.ps1' -and \$_.Name -ne '_update.log') {
+            Copy-Item -Path \$_.FullName -Destination \$backupDir -Recurse -Force -ErrorAction Stop
+        }
+    }
+} catch {
+    Write-Log "ERROR: backup failed: \$_"
+    exit 1
+}
+
+# 7) Apply update: overlay extracted payload onto appDir.
+Write-Log "Applying update..."
+try {
+    Get-ChildItem -Path \$extractDir -Force | ForEach-Object {
+        Copy-Item -Path \$_.FullName -Destination \$appDir -Recurse -Force -ErrorAction Stop
+    }
+    Write-Log "Apply done."
+} catch {
+    Write-Log "ERROR: apply failed: \$_"
+    Restore-Backup
+    Write-Log "Restored, aborting."
+    exit 1
+}
+
+# 8) Verify final EXE in place.
+\$finalExe = Join-Path \$appDir \$exeName
+if (-not (Test-Path \$finalExe)) {
+    Write-Log "ERROR: final EXE missing after apply"
+    Restore-Backup
+    exit 1
+}
+
+# 9) Restart the app.
+Write-Log "Restarting app..."
+try {
+    Start-Process -FilePath \$finalExe -WorkingDirectory \$appDir
+} catch {
+    Write-Log "WARN: failed to restart app: \$_"
+}
+
+# 10) Cleanup workspace (keep log for diagnosis).
 Start-Sleep -Seconds 2
-Remove-Item \$zipPath -Force -ErrorAction SilentlyContinue
-\$scriptPath = Join-Path \$appDir '_update.ps1'
-Remove-Item \$scriptPath -Force -ErrorAction SilentlyContinue
+Remove-Item -Path \$zipPath    -Force -ErrorAction SilentlyContinue
+Remove-Item -Path \$extractDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path \$backupDir  -Recurse -Force -ErrorAction SilentlyContinue
+
+# Schedule self-deletion of this script (we can't delete the file we are running).
+\$selfPath = \$MyInvocation.MyCommand.Path
+if (\$selfPath) {
+    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c timeout /t 3 >nul && del ""\$selfPath""" -WindowStyle Hidden
+}
+
 Write-Log "Updater finished."
 ''';
   }
