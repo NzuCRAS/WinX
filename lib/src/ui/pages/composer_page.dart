@@ -12,7 +12,9 @@ import 'package:desktop_drop/desktop_drop.dart';
 import '../../app/app_state.dart';
 import '../../app/composer_controller.dart';
 import '../../app/cookie_controller.dart';
+import '../../app/settings_controller.dart';
 import '../../data/cookie_store.dart';
+import 'settings/shortcut_settings_page.dart';
 import '../../data/draft_store.dart';
 import '../../data/post_history_store.dart';
 
@@ -943,6 +945,11 @@ final class _DraggableScalableDialogState extends State<_DraggableScalableDialog
     _scale = clampedScale;
     _offset = clampedOffset;
 
+    final settings = context.watch<SettingsController>();
+    final backShortcut = parseShortcutActivator(
+      settings.shortcuts['back'] ?? 'Escape',
+    );
+
     return Actions(
       actions: {
         _SendIntent: CallbackAction<_SendIntent>(
@@ -961,10 +968,10 @@ final class _DraggableScalableDialogState extends State<_DraggableScalableDialog
       },
       child: Shortcuts(
         shortcuts: {
-          LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.enter):
+          const SingleActivator(LogicalKeyboardKey.enter, control: true):
               const _SendIntent(),
-          const SingleActivator(LogicalKeyboardKey.escape):
-              const _CancelIntent(),
+          if (backShortcut != null)
+            backShortcut: const _CancelIntent(),
         },
         child: Focus(
           autofocus: true,

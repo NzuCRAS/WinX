@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:xdnmb_api/xdnmb_api.dart' as api;
 
@@ -10,6 +9,7 @@ import '../../app/app_state.dart';
 import '../../app/composer_controller.dart';
 import '../../app/cookie_controller.dart';
 import '../../app/settings_controller.dart';
+import 'settings/shortcut_settings_page.dart';
 import '../../data/history_store.dart';
 import '../../data/local_prefs.dart';
 import '../../data/subscription_store.dart';
@@ -76,6 +76,10 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
   // Keys for each post so we can jump to a specific post via
   // Scrollable.ensureVisible.
   final List<GlobalKey> _postKeys = [];
+
+  bool _refreshCancelled = false;
+  Timer? _refreshTimeoutTimer;
+  ScaffoldMessengerState? _scaffoldMessenger;
 
   // True while [_loadSurroundingPages] is running. Used to defer
   // jump-failure handling until all surrounding pages are loaded.
@@ -200,6 +204,12 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
     _saveTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted) _flushCursorOnExit();
     });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _scaffoldMessenger ??= ScaffoldMessenger.of(context);
   }
 
   void _onRefreshSignal() {
@@ -394,6 +404,9 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
 
   @override
   void dispose() {
+    _refreshTimeoutTimer?.cancel();
+    _scaffoldMessenger?.clearSnackBars();
+
     WidgetsBinding.instance.removeObserver(this);
     _scrollController.removeListener(_onScroll);
 
@@ -664,6 +677,7 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
     _LoadDirection direction = _LoadDirection.append,
     bool adjustScroll = true,
   }) async {
+    if (_refreshCancelled) return false;
     if (_loadingPage) return false;
     if (!mounted) return false;
 
@@ -686,10 +700,10 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
     }
 
     setState(() {
-      if (direction == _LoadDirection.refresh || _posts.isEmpty) {
+      if (_posts.isEmpty) {
         _loading = true;
-        _error = null;
       }
+      _error = null;
       _loadingPage = true;
     });
     perf.check('setState.loading');
@@ -708,6 +722,8 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
               page,
               forceRefresh: forceRefresh,
             );
+
+      if (_refreshCancelled) return false;
 
       perf.check(
         'request.end',
@@ -733,7 +749,11 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
           _loadedMaxReplyPage = page;
           _postIdToPage.clear();
         } else if (direction == _LoadDirection.append) {
-          _posts.addAll(thread.replies);
+          final existingIds = _posts.map((p) => p.id).toSet();
+          final newReplies = thread.replies
+              .where((r) => !existingIds.contains(r.id))
+              .toList();
+          _posts.addAll(newReplies);
           _loadedMaxReplyPage = page;
         } else if (direction == _LoadDirection.prepend) {
           // Insert after mainPost (index 1).
@@ -1163,10 +1183,15 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
 
   @override
   Widget build(BuildContext context) {
+    final settings = context.watch<SettingsController>();
+    final backShortcut = parseShortcutActivator(
+      settings.shortcuts['back'] ?? 'Escape',
+    );
+
     return Shortcuts(
       shortcuts: {
-        const SingleActivator(LogicalKeyboardKey.escape):
-            const BackIntent(),
+        if (backShortcut != null)
+          backShortcut: const BackIntent(),
       },
       child: Actions(
         actions: {
@@ -1234,16 +1259,72 @@ final class _ThreadPageState extends State<ThreadPage> with WidgetsBindingObserv
                 IconButton(
                   tooltip: '刷新页面',
                   onPressed: () async {
-                    await _loadPage(1,
-                        direction: _LoadDirection.refresh,
-                        forceRefresh: true);
-                    if (_scrollController.hasClients) {
-                      _scrollController.animateTo(
-                        0,
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeOut,
+                    if (_loadingPage) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('正在加载中，请稍候…'),
+                          duration: Duration(seconds: 1),
+                        ),
+                      );
+                      return;
+                    }
+
+                    _refreshCancelled = false;
+                    _refreshTimeoutTimer?.cancel();
+
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('正在刷新…'),
+                          duration: Duration(days: 1),
+                        ),
                       );
                     }
+
+                    _refreshTimeoutTimer = Timer(
+                      const Duration(seconds: 10),
+                      () {
+                        if (!mounted) return;
+                        _refreshCancelled = true;
+                        setState(() => _loadingPage = false);
+                        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('刷新超时，请检查网络连接'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      },
+                    );
+
+                    var page = (_loadedMaxReplyPage ?? 1) + 1;
+                    var loadedNew = false;
+                    while (mounted && page <= 200) {
+                      final beforeCount = _posts.length;
+                      final ok = await _loadPage(page,
+                          direction: _LoadDirection.append,
+                          forceRefresh: true);
+                      if (!ok) break;
+                      if (_posts.length > beforeCount) loadedNew = true;
+                      if (!_hasMore) break;
+                      page++;
+                    }
+
+                    _refreshTimeoutTimer?.cancel();
+                    _refreshTimeoutTimer = null;
+
+                    if (mounted && !_refreshCancelled) {
+                      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(loadedNew ? '刷新完成' : '已是最新内容'),
+                          duration: const Duration(seconds: 1),
+                        ),
+                      );
+                    }
+
+                    _refreshCancelled = false;
                   },
                   icon: const Icon(Icons.refresh_outlined),
                 ),

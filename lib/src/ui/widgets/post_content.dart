@@ -578,21 +578,48 @@ String _formatToSeconds(DateTime dt) {
 String _normalizePostText(String input) {
   var s = input;
 
-  // Basic HTML -> plain text
-  s = s.replaceAll(RegExp(r'<\s*br\s*\/?>', caseSensitive: false), '\n');
+  // Detect whether the user explicitly entered blank lines.
+  // Servers may wrap paragraphs in <p> tags; we should not treat
+  // the spacing between <p> blocks as a user-intended blank line.
+  // But <br><br> (or <br> followed by another <br> after whitespace)
+  // is the only reliable signal of an intentional blank line.
+  final hasExplicitBlank = RegExp(
+    r'<\s*br\s*\/?>\s*<\s*br\s*\/?>',
+    caseSensitive: false,
+  ).hasMatch(s);
+
+  // Drop empty paragraphs (and paragraphs that contain only <br>)
+  // so they don't turn into spurious blank lines.
+  s = s.replaceAll(
+    RegExp(
+      r'<\s*p\b[^>]*>\s*(?:<\s*br\s*\/?>\s*)*\s*<\s*\/p\s*>',
+      caseSensitive: false,
+    ),
+    '',
+  );
+
+  // Remove \r\n and \r first — they are HTML source formatting,
+  // not content. Doing this before <br> conversion prevents
+  // <br>\r\n from turning into two newlines.
+  s = s.replaceAll('\r\n', '').replaceAll('\r', '');
+
+  // Basic HTML -> plain text.
+  // Match <br> together with trailing whitespace (including the \n that
+  // often follows it in HTML source) so each <br> produces exactly one \n.
+  s = s.replaceAll(RegExp(r'<\s*br\s*\/?>\s*', caseSensitive: false), '\n');
   s = s.replaceAll(RegExp(r'<\s*\/p\s*>', caseSensitive: false), '\n');
   s = s.replaceAll(RegExp(r'<\s*p\s*>', caseSensitive: false), '');
 
-  // Strip <font ...> but keep inner text
+  // Strip <font ...> but keep inner text.
   s = s.replaceAll(
     RegExp(r'<\s*\/\s*font\s*>', caseSensitive: false), '');
   s = s.replaceAll(
     RegExp(r'<\s*font\b[^>]*>', caseSensitive: false), '');
 
-  // Strip remaining tags conservatively
+  // Strip remaining tags conservatively.
   s = s.replaceAll(RegExp(r'<[^>]+>'), '');
 
-  // Common HTML entities
+  // Common HTML entities.
   s = s
       .replaceAll('&gt;', '>')
       .replaceAll('&lt;', '<')
@@ -600,12 +627,14 @@ String _normalizePostText(String input) {
       .replaceAll('&quot;', '"')
       .replaceAll('&#39;', "'");
 
-  // Normalize newlines
-  s = s.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-
-  // Collapse consecutive blank lines into a single newline to avoid
-  // excessive vertical spacing in rendered posts.
-  s = s.replaceAll(RegExp(r'\n{2,}'), '\n');
+  if (!hasExplicitBlank) {
+    // No explicit blank line — collapse all consecutive newlines
+    // to a single newline so <p>...</p> blocks don't create gaps.
+    s = s.replaceAll(RegExp(r'\n{2,}'), '\n');
+  }
+  // When the user explicitly entered blank lines via <br><br>,
+  // preserve the original count so the post renders the same way
+  // as the official web version.
 
   return s;
 }

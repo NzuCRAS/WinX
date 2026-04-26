@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -76,6 +77,9 @@ final class _HomePageState extends State<HomePage> {
 
   final _historyStore = HistoryStore();
   final _commonForumsStore = CommonForumsStore();
+
+  Timer? _refreshTimeoutTimer;
+  ScaffoldMessengerState? _scaffoldMessenger;
 
   // In-memory cache for fast sidebar rendering.
   final Set<int> _commonForumIds = <int>{};
@@ -188,34 +192,91 @@ final class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _refreshCurrentSection() async {
-    // Always best-effort refresh the random cover.
-    // ignore: discarded_futures
-    _refreshRandomCover();
+    _refreshTimeoutTimer?.cancel();
 
-    // 0=start, 1=forum, 2=sub, 3=history, 4=myPosts, 5=user
-    if (_sectionIndex == 1) {
-      await _refreshThreads();
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          0,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-      return;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('正在刷新…'),
+          duration: Duration(days: 1),
+        ),
+      );
     }
 
-    // Refresh forum list (also refreshes sidebar common forums cache).
-    await _loadForumList();
+    _refreshTimeoutTimer = Timer(
+      const Duration(seconds: 10),
+      () {
+        if (!mounted) return;
+        setState(() => _loadingPage = false);
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('刷新超时，请检查网络连接'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      },
+    );
+
+    try {
+      // Always best-effort refresh the random cover.
+      // ignore: discarded_futures
+      _refreshRandomCover();
+
+      bool success;
+      // 0=start, 1=forum, 2=sub, 3=history, 4=myPosts, 5=user
+      if (_sectionIndex == 1) {
+        success = await _refreshThreads();
+        if (success && _scrollController.hasClients) {
+          _scrollController.animateTo(
+            0,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      } else {
+        success = await _loadForumList();
+        if (!success && mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('刷新失败'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+
+      _refreshTimeoutTimer?.cancel();
+      _refreshTimeoutTimer = null;
+
+      if (mounted && success) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('刷新完成'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+    } catch (e) {
+      _refreshTimeoutTimer?.cancel();
+      _refreshTimeoutTimer = null;
+      // _loadPage 内部已显示错误 Toast
+    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _scaffoldMessenger ??= ScaffoldMessenger.of(context);
   }
 
   @override
   void dispose() {
+    _refreshTimeoutTimer?.cancel();
+    _scaffoldMessenger?.clearSnackBars();
+
     _scrollController
       ..removeListener(_onScroll)
       ..dispose();
@@ -239,7 +300,7 @@ final class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _loadForumList() async {
+  Future<bool> _loadForumList() async {
   final myGen = ++_forumListReqGen;
   final perf = PerfLog.stage('home.forumList');
   perf.check('start');
@@ -256,8 +317,8 @@ final class _HomePageState extends State<HomePage> {
       final list = await app.repo.getForumList();
   perf.check('request.forums.end');
 
-  if (!mounted) return;
-  if (myGen != _forumListReqGen) return;
+  if (!mounted) return true;
+  if (myGen != _forumListReqGen) return true;
 
       // getForumList() 里 id<0 的时间线条目通常只有一个（例如 -1: "时间线"），
       // 真正的子时间线（综合线/创作线/...）需要从 getTimelineList() 单独获取。
@@ -271,8 +332,8 @@ final class _HomePageState extends State<HomePage> {
   perf.check('request.timelines.err');
       }
 
-  if (!mounted) return;
-  if (myGen != _forumListReqGen) return;
+  if (!mounted) return true;
+  if (myGen != _forumListReqGen) return true;
 
       final mergedList = api.ForumList(list.forumGroupList, list.forumList, timelines);
       setState(() {
@@ -297,14 +358,17 @@ final class _HomePageState extends State<HomePage> {
       if (_selectedForumId == null && list.forumList.isNotEmpty) {
         await _selectForum(list.forumList.first);
       }
+
+      return true;
     } catch (e) {
-  if (!mounted) return;
-  if (myGen != _forumListReqGen) return;
+  if (!mounted) return false;
+  if (myGen != _forumListReqGen) return false;
   perf.end('error', {'err': e.toString()});
       setState(() {
         _error = e;
         _loading = false;
       });
+      return false;
     }
   }
 
@@ -467,10 +531,10 @@ final class _HomePageState extends State<HomePage> {
     return TextSpan(style: baseStyle, children: spans);
   }
 
-  Future<void> _loadPage(int page, {bool forceRefresh = false}) async {
+  Future<bool> _loadPage(int page, {bool forceRefresh = false}) async {
     final app = context.read<AppState>();
     final forumId = _selectedForumId;
-    if (forumId == null) return;
+    if (forumId == null) return false;
 
     final perf = PerfLog.stage('home.threadList');
     perf.check(
@@ -498,8 +562,8 @@ final class _HomePageState extends State<HomePage> {
           : await app.repo
               .getForumPage(forumId, page, forceRefresh: forceRefresh);
       perf.check('request.end', fields: {'items': items.length});
-  if (!mounted) return;
-  if (myGen != _threadsReqGen) return;
+  if (!mounted) return true;
+  if (myGen != _threadsReqGen) return true;
 
   setState(() {
         if (page == 1) {
@@ -520,7 +584,7 @@ final class _HomePageState extends State<HomePage> {
         final keepMin = (page - 4).clamp(1, page);
         final keepMax = page + 1;
         if (_selectedIsTimeline) {
-          // ignore: discarded_futures
+          // ignore: discarded-futures
           app.repo.prefetchTimelineAdjacentPages(
             timelineId: forumId,
             currentPage: page,
@@ -530,7 +594,7 @@ final class _HomePageState extends State<HomePage> {
             keepMaxPage: keepMax,
           );
         } else {
-          // ignore: discarded_futures
+          // ignore: discarded-futures
           app.repo.prefetchForumAdjacentPages(
             forumId: forumId,
             currentPage: page,
@@ -545,9 +609,11 @@ final class _HomePageState extends State<HomePage> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         perf.end('firstFrame', {'threads': _threads.length, 'hasMore': _hasMore});
       });
+
+      return true;
     } catch (e) {
-  if (!mounted) return;
-  if (myGen != _threadsReqGen) return;
+  if (!mounted) return false;
+  if (myGen != _threadsReqGen) return false;
 
       perf.end('error', {'err': e.toString()});
 
@@ -558,6 +624,7 @@ final class _HomePageState extends State<HomePage> {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('加载失败：$e')));
       }
+      return false;
     }
   }
 
@@ -566,8 +633,8 @@ final class _HomePageState extends State<HomePage> {
     await _loadPage(_page + 1);
   }
 
-  Future<void> _refreshThreads() async {
-    await _loadPage(1, forceRefresh: true);
+  Future<bool> _refreshThreads() async {
+    return _loadPage(1, forceRefresh: true);
   }
 
   // 主页不提供跳页：跳页仅在串内（ThreadPage）保留。
@@ -591,6 +658,7 @@ final class _HomePageState extends State<HomePage> {
           IconButton(
             tooltip: '设置',
             onPressed: () {
+              _scaffoldMessenger?.clearSnackBars();
               Navigator.of(context).push(
                 MaterialPageRoute(builder: (context) => const SettingsShellPage()),
               );
@@ -599,7 +667,10 @@ final class _HomePageState extends State<HomePage> {
           ),
           IconButton(
             tooltip: '用户',
-            onPressed: () => setState(() => _sectionIndex = 5),
+            onPressed: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 5);
+                        },
             icon: Icon(
               context.watch<CookieController>().hasCookie
                   ? Icons.verified_user_outlined
@@ -769,7 +840,10 @@ final class _HomePageState extends State<HomePage> {
                   children: [
                     if (_sidebarExpanded)
                       InkWell(
-                        onTap: () => setState(() => _sectionIndex = 0),
+                        onTap: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 0);
+                        },
                         borderRadius: BorderRadius.circular(8),
                         child: Image.asset('assets/岛娘.png', width: 34, height: 34),
                       )
@@ -777,7 +851,10 @@ final class _HomePageState extends State<HomePage> {
                       Expanded(
                         child: Center(
                           child: InkWell(
-                            onTap: () => setState(() => _sectionIndex = 0),
+                            onTap: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 0);
+                        },
                             borderRadius: BorderRadius.circular(8),
                             child: Image.asset('assets/岛娘.png', width: 34, height: 34),
                           ),
@@ -787,7 +864,10 @@ final class _HomePageState extends State<HomePage> {
                       const SizedBox(width: 10),
                       Expanded(
                         child: InkWell(
-                          onTap: () => setState(() => _sectionIndex = 0),
+                          onTap: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 0);
+                        },
                           borderRadius: BorderRadius.circular(8),
                           child: Padding(
                             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -835,21 +915,30 @@ final class _HomePageState extends State<HomePage> {
                   label: '订阅',
                   expanded: _sidebarExpanded,
                   selected: _sectionIndex == 2,
-                  onTap: () => setState(() => _sectionIndex = 2),
+                  onTap: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 2);
+                        },
                 ),
                 _SidebarAction(
                   icon: Icons.history,
                   label: '历史',
                   expanded: _sidebarExpanded,
                   selected: _sectionIndex == 3,
-                  onTap: () => setState(() => _sectionIndex = 3),
+                  onTap: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 3);
+                        },
                 ),
                 _SidebarAction(
                   icon: Icons.edit_note_outlined,
                   label: '发言',
                   expanded: _sidebarExpanded,
                   selected: _sectionIndex == 4,
-                  onTap: () => setState(() => _sectionIndex = 4),
+                  onTap: () {
+                          _scaffoldMessenger?.clearSnackBars();
+                          setState(() => _sectionIndex = 4);
+                        },
                 ),
               ],
             ),
@@ -880,6 +969,7 @@ final class _HomePageState extends State<HomePage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                         onTap: () async {
+                          _scaffoldMessenger?.clearSnackBars();
                           setState(() => _sectionIndex = 1);
                           await _selectForum(forum);
                         },
@@ -925,6 +1015,7 @@ final class _HomePageState extends State<HomePage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                         onTap: () async {
+                          _scaffoldMessenger?.clearSnackBars();
                           setState(() => _sectionIndex = 1);
                           await _selectForum(api.Forum(
                             id: t.id,
@@ -965,6 +1056,7 @@ final class _HomePageState extends State<HomePage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                         onTap: () async {
+                          _scaffoldMessenger?.clearSnackBars();
                           setState(() => _sectionIndex = 1);
                           await _selectForum(forum);
                         },
@@ -982,6 +1074,7 @@ final class _HomePageState extends State<HomePage> {
               return IconButton(
                 tooltip: _normalizeForListPreview(forum.showName),
                 onPressed: () async {
+                  _scaffoldMessenger?.clearSnackBars();
                   setState(() => _sectionIndex = 1);
                   await _selectForum(forum);
                 },

@@ -6,6 +6,45 @@ import 'package:smooth_list_view/smooth_list_view.dart';
 
 import '../../../app/settings_controller.dart';
 
+/// 将存储的快捷键字符串（如 `"Escape"`、`"Control+Enter"`）解析为 [SingleActivator]。
+SingleActivator? parseShortcutActivator(String combo) {
+  final parts = combo.split('+');
+  var control = false;
+  var shift = false;
+  var alt = false;
+  var meta = false;
+  LogicalKeyboardKey? mainKey;
+
+  for (final part in parts) {
+    switch (part) {
+      case 'Control':
+        control = true;
+      case 'Shift':
+        shift = true;
+      case 'Alt':
+        alt = true;
+      case 'Meta':
+        meta = true;
+      default:
+        for (final key in LogicalKeyboardKey.knownLogicalKeys) {
+          if (key.keyLabel == part) {
+            mainKey = key;
+            break;
+          }
+        }
+    }
+  }
+
+  if (mainKey == null) return null;
+  return SingleActivator(
+    mainKey,
+    control: control,
+    shift: shift,
+    alt: alt,
+    meta: meta,
+  );
+}
+
 final class ShortcutSettingsPage extends StatefulWidget {
   const ShortcutSettingsPage({super.key});
 

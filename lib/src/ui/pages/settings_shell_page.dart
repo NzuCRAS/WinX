@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
+import 'package:smooth_list_view/smooth_list_view.dart';
+
+import '../../app/settings_controller.dart';
 import 'font_settings_page.dart';
 import 'settings/appearance_settings_page.dart';
 import 'settings/browse_settings_page.dart';
@@ -8,7 +11,6 @@ import 'settings/shortcut_settings_page.dart';
 import 'settings/storage_settings_page.dart';
 import 'settings/debug_settings_page.dart';
 import 'settings/about_settings_page.dart';
-import 'package:smooth_list_view/smooth_list_view.dart';
 
 final class BackIntent extends Intent {
   const BackIntent();
@@ -46,10 +48,15 @@ final class _SettingsShellPageState extends State<SettingsShellPage> {
       AboutSettingsPage(),
     ];
 
+    final settings = context.watch<SettingsController>();
+    final backShortcut = parseShortcutActivator(
+      settings.shortcuts['back'] ?? 'Escape',
+    );
+
     return Shortcuts(
       shortcuts: {
-        const SingleActivator(LogicalKeyboardKey.escape):
-            const BackIntent(),
+        if (backShortcut != null)
+          backShortcut: const BackIntent(),
       },
       child: Actions(
         actions: {
